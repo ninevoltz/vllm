@@ -424,6 +424,20 @@ The launcher's optimization variables are opt-in outside the script:
 | `VLLM_GFX908_QSA_PREFILL_TILED=1`, `VLLM_GFX908_QSA_NUM_COLUMNS=1`, `VLLM_GFX908_W4_DEQUANT_LARGE_M=1` | Reduce prefill attention and projection overhead. |
 | `VLLM_GFX908_HIP_BUILD_DIR` | Select the native extension build/cache directory. |
 
+Monitor a running server without submitting inference requests:
+
+```bash
+<venv>/bin/python tools/mi100/server_stats.py --url http://127.0.0.1:8001
+```
+
+The display refreshes every two seconds. Use `--interval 5` to change the
+refresh period, `--count 1` for a single snapshot, and Ctrl+C to exit.
+It reports sampled prompt/generation rates, cumulative tokens, active/queued
+requests, maximum KV usage across engines, cumulative MTP acceptance and
+mean acceptance length, and request errors. Rates appear after the second
+sample; idle traffic reports zero, while unavailable metrics show `n/a`.
+It retries connection failures and resets rate sampling after server restarts.
+
 Set `--max-model-len 262144` only when the checkpoint declares that context
 limit and sufficient KV-cache memory is available. The configuration limit
 alone does not establish long-context accuracy. Run
