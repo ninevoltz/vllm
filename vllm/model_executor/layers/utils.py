@@ -910,6 +910,13 @@ def rocm_unquantized_gemm_gfx908_impl(
       - wvSplitK 2.1-6.7x faster than rocBLAS (wins on (1, 1, 2048))
       - LLMM1 also beats AITER for (1, 62080, 2048) lm_head: 244us vs 267us
     """
+    from vllm.model_executor.layers.gfx908_w8a16 import w8a16_enabled, w8a16_gemm
+
+    if w8a16_enabled():
+        output = w8a16_gemm(x, weight, bias)
+        if output is not None:
+            return output
+
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
     k = weight.shape[1]

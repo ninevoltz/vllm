@@ -233,8 +233,12 @@ class UnquantizedLinearMethod(LinearMethodBase):
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
             from vllm.platforms.rocm import on_gfx908
 
-            if on_gfx908() and os.environ.get("VLLM_GFX908_PREBIND_GEMM", "0") == "1":
-                bind_rocm_unquantized_gemm_gfx908(layer)
+            if on_gfx908():
+                from vllm.model_executor.layers.gfx908_w8a16 import prepare_w8a16_layer
+
+                prepare_w8a16_layer(layer)
+                if os.environ.get("VLLM_GFX908_PREBIND_GEMM", "0") == "1":
+                    bind_rocm_unquantized_gemm_gfx908(layer)
         elif self._gemm_impl is cuda_unquantized_gemm:
             maybe_use_skinny_gemm(layer)
 

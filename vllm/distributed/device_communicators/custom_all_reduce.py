@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import contextmanager
 from typing import Literal, cast
 
@@ -162,6 +163,7 @@ class CustomAllreduce:
         self._IS_CAPTURING = False
         self._capture_registered = register_graph_buffers
         self._ptr = 0
+        self._push_ar = None
         self.disabled = True
         self.mnnvl_buffer = None
         self.mnnvl_handle = None
@@ -336,6 +338,12 @@ class CustomAllreduce:
             self.meta_ptrs, self.rank_data, rank, self.fully_connected
         )
         ops.register_buffer(self._ptr, self.buffer_ptrs)
+        if current_platform.is_rocm():
+            from vllm.distributed.device_communicators.gfx908_push_ar import (
+                maybe_create_push_ar,
+            )
+
+            self._push_ar = maybe_create_push_ar(self)
         self._init_mnnvl_buffer(
             max(
                 max_mnnvl_all_gather_size * world_size,
@@ -503,6 +511,13 @@ class CustomAllreduce:
         if inp.dtype not in (torch.float32, torch.float16, torch.bfloat16):
             return False
         inp_size = inp.numel() * inp.element_size()
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx908
+
+            if on_gfx908():
+                cap = float(os.environ.get("VLLM_GFX908_CUSTOM_AR_MAX_SIZE_MB", "2"))
+                if inp_size > cap * 1024 * 1024:
+                    return False
         # custom allreduce requires input byte size to be multiples of 16
         if inp_size % 16 != 0:
             return False
@@ -552,6 +567,12 @@ class CustomAllreduce:
         # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
             return None
+        if self._push_ar is not None and not (
+            self._IS_CAPTURING and not torch.cuda.is_current_stream_capturing()
+        ):
+            output = self._push_ar.maybe_all_reduce(input)
+            if output is not None:
+                return output
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
                 # gfx908: route captured all-reduce through the pre-registered
@@ -729,6 +750,9 @@ class CustomAllreduce:
 
     def close(self):
         if not self.disabled and self._ptr:
+            if self._push_ar is not None:
+                self._push_ar.close()
+                self._push_ar = None
             if ops is not None:
                 ops.dispose(self._ptr)
             self._ptr = 0

@@ -29,7 +29,6 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -309,6 +308,31 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         else:
             embeddings = sp_shard(embeddings)
         return embeddings.view(output_dtype)
+
+    def compute_ngram_ids(
+        self,
+        input_ids: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        ngram_context: torch.Tensor,
+    ) -> torch.Tensor:
+        """Hash rows before forward so checkpoint reads precede graph replay."""
+        output = torch.empty(
+            (input_ids.numel(), self.ngram_heads),
+            dtype=torch.int64,
+            device=input_ids.device,
+        )
+        ple_ngram_ids(
+            input_ids=input_ids.reshape(-1),
+            query_start_loc=query_start_loc,
+            ngram_context=ngram_context,
+            layer_multipliers=self.layer_multipliers,
+            ngram_heads_vocab_sizes=self.ngram_heads_vocab_sizes,
+            ngram_heads_offsets=self.ngram_heads_offsets,
+            eos_token_id=self.eos_token_id,
+            heads_per_ngram=self.heads_per_ngram,
+            output=output,
+        )
+        return output
 
     def forward(
         self,
@@ -832,10 +856,6 @@ def qwen4_exp_amd_ple_ngram_embedding(
         raise TypeError(f"{layer_name} is not a Qwen4Exp PLE owner")
     embedding = layer.ple_embedding.ngram_embedding
     if isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
-        embedding.copy_ids_to_host(ngram_ids)
-        with gpu_sync_allowed():
-            torch.accelerator.current_stream().synchronize()
-        embedding.stage_rows(ngram_ids.shape[0])
         result = embedding.staged_rows(ngram_ids.shape[0])
     else:
         result = embedding(ngram_ids).flatten(-2)

@@ -652,6 +652,35 @@ removed_environment_variables: dict[str, str] = {
 }
 
 environment_variables: dict[str, Callable[[], Any]] = {
+    # Opt-in MI100 kernel paths; the launcher selects the validated combination.
+    "VLLM_GFX908_W8A16": lambda: os.getenv("VLLM_GFX908_W8A16", "0") == "1",
+    "VLLM_GFX908_W4A8": lambda: os.getenv("VLLM_GFX908_W4A8", "0") == "1",
+    "VLLM_GFX908_HC_W8": lambda: os.getenv("VLLM_GFX908_HC_W8", "0") == "1",
+    "VLLM_GFX908_HC_W8_FREE": lambda: os.getenv("VLLM_GFX908_HC_W8_FREE", "1") == "1",
+    "VLLM_GFX908_SMALLM_HC_W8": lambda: (
+        os.getenv("VLLM_GFX908_SMALLM_HC_W8", "0") == "1"
+    ),
+    "VLLM_GFX908_PUSH_AR": lambda: os.getenv("VLLM_GFX908_PUSH_AR", "0") == "1",
+    "VLLM_GFX908_GDN_FUSED": lambda: os.getenv("VLLM_GFX908_GDN_FUSED", "0") == "1",
+    "VLLM_GFX908_GDN_FUSED_SPEC": lambda: (
+        os.getenv("VLLM_GFX908_GDN_FUSED_SPEC", "0") == "1"
+    ),
+    "VLLM_GFX908_W4_DEQUANT_LARGE_M": lambda: (
+        os.getenv("VLLM_GFX908_W4_DEQUANT_LARGE_M", "0") == "1"
+    ),
+    "VLLM_GFX908_QSA_PREFILL_TILED": lambda: (
+        os.getenv("VLLM_GFX908_QSA_PREFILL_TILED", "0") == "1"
+    ),
+    "VLLM_GFX908_QSA_NUM_COLUMNS": lambda: (
+        os.getenv("VLLM_GFX908_QSA_NUM_COLUMNS", "0") == "1"
+    ),
+    "VLLM_GFX908_HIP_BUILD_DIR": lambda: os.getenv(
+        "VLLM_GFX908_HIP_BUILD_DIR", os.path.expanduser("~/.cache/vllm/gfx908_w4gemv")
+    ),
+    "VLLM_GFX908_MTP_QUANT": lambda: os.getenv("VLLM_GFX908_MTP_QUANT", "off"),
+    "VLLM_GFX908_CUSTOM_AR_MAX_SIZE_MB": lambda: float(
+        os.getenv("VLLM_GFX908_CUSTOM_AR_MAX_SIZE_MB", "2")
+    ),
     # ================== Installation Time Env Vars ==================
     # Target device of vLLM, supporting [cuda (by default),
     # rocm, cpu]
@@ -1264,7 +1293,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # potantially caused by a bug in the driver (535 series),
     # if might be helpful to set VLLM_SKIP_P2P_CHECK=0
     # so that vLLM can verify if p2p is actually working.
-    # See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
+    # See
+    # https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108
+    # for details. # noqa
     "VLLM_SKIP_P2P_CHECK": lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "1") == "1",
     # List of quantization kernels that should be disabled, used for testing
     # and performance comparisons. Currently only affects MPLinearKernel

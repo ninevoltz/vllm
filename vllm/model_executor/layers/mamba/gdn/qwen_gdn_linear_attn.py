@@ -890,6 +890,12 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         if self.speculative_config is not None:
             logger.info_once("GDN spec decode kernel: %s", self.gdn_decode_kernel)
 
+        from vllm.model_executor.layers.mamba.gdn.gfx908_gdn_fused import (
+            gdn_fused_layer_supported,
+        )
+
+        self._gfx908_gdn_fused = gdn_fused_layer_supported(self, vllm_config)
+
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -1263,7 +1269,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
     ) -> torch.Tensor:
         """ROCm forward using AITER Triton fused projection+attention when
         available, otherwise falling back to the generic CUDA path."""
-        if GDN_AITER_TRITON_AVAILABLE and not self.enable_fused_gdn_spec_decode:
+        if (
+            GDN_AITER_TRITON_AVAILABLE
+            and not self.enable_fused_gdn_spec_decode
+            and not self._gfx908_gdn_fused
+        ):
             num_tokens = hidden_states.size(0)
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
@@ -1331,7 +1341,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
 
         use_fused_gdn_spec_decode = (
-            self.enable_fused_gdn_spec_decode
+            (self.enable_fused_gdn_spec_decode or self._gfx908_gdn_fused)
             and hidden_states.dtype == torch.bfloat16
             and self.norm.weight.dtype in (torch.bfloat16, torch.float32)
         )
@@ -2407,6 +2417,15 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, GDNAttentionMetadata)
+        if self._gfx908_gdn_fused:
+            from vllm.model_executor.layers.mamba.gdn.gfx908_gdn_fused import (
+                maybe_fused_gdn_decode,
+            )
+
+            if maybe_fused_gdn_decode(
+                self, mixed_qkvz, ba, core_attn_out, attn_metadata
+            ):
+                return
         mixed_qkv, output_gate_flat = mixed_qkvz.split(
             [qkv_size, self.value_dim // self.tp_size], dim=-1
         )

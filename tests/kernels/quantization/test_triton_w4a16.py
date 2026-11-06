@@ -521,3 +521,24 @@ def test_triton_w4a16_gemm_rows_past_int32_offsets(K, N):
     ref = (a[-64:].float() @ w.float()).to(torch.bfloat16)
 
     torch.testing.assert_close(out[-64:], ref, rtol=1e-2, atol=1e-2)
+
+
+@pytest.mark.parametrize("bits", [4, 8])
+def test_mtp_rtn_weights_use_checkpoint_gptq_packing(bits: int) -> None:
+    """Known representable weights retain GPTQ's K packing and stored zero."""
+    from vllm.models.qwen4_exp.amd.gfx908_mtp_quant import rtn_gptq_pack
+
+    if bits == 4:
+        values = torch.arange(-8, 8).repeat(2)
+        words = [0x76543210, -0x01234568] * 2
+        zero = 0x77777777
+    else:
+        values = torch.tensor([-127, 127, 0, 1, -1, 64, -64, 2]).repeat(16)
+        words = [-0x7E7F00FF, -0x7DBF3F81] * 16
+        zero = 0x7F7F7F7F
+    weight = values.to(torch.bfloat16).expand(8, -1).contiguous()
+    packed = rtn_gptq_pack(weight, bits, values.numel())
+    expected = torch.tensor(words, dtype=torch.int32).unsqueeze(1).expand(-1, 8)
+    assert torch.equal(packed["qweight"], expected)
+    assert torch.equal(packed["scales"], torch.ones_like(packed["scales"]))
+    assert torch.equal(packed["qzeros"], torch.full_like(packed["qzeros"], zero))

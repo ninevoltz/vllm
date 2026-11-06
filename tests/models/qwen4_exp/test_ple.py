@@ -2882,3 +2882,25 @@ def test_amd_disk_ple_loads_exact_checkpoint_rows(
     embedding.stage_rows(4)
     actual = embedding.staged_rows(4).cpu()
     torch.testing.assert_close(actual, table[ids.cpu()].flatten(-2), rtol=0, atol=0)
+
+    if device == "cuda":
+        # A replay must consume newly staged rows without capturing host reads.
+        tokens = torch.tensor([1, 2, 3, 4], dtype=torch.int32, device=device)
+        starts = torch.tensor([0, 4], dtype=torch.int32, device=device)
+        context = torch.tensor([[0]], dtype=torch.int32, device=device)
+        stage_checkpoint_rows([(module, embedding)], tokens, starts, context)
+        if device == "cuda":
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                output = embedding.staged_rows(4).clone()
+        for token in (5, 9):
+            tokens.fill_(token)
+            stage_checkpoint_rows([(module, embedding)], tokens, starts, context)
+            if device == "cuda":
+                graph.replay()
+            else:
+                output = embedding.staged_rows(4).clone()
+            expected_ids = module.compute_ngram_ids(tokens, starts, context).cpu()
+            torch.testing.assert_close(
+                output.cpu(), table[expected_ids].flatten(-2), rtol=0, atol=0
+            )

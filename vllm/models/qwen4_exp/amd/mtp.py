@@ -23,6 +23,7 @@ from transformers import Qwen4ExpTextConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, replace, set_current_vllm_config
 from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -47,6 +48,14 @@ from vllm.models.common.ops.sequence_parallel import sp_all_gather, sp_shard
 from vllm.sequence import IntermediateTensors
 
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
+from .gfx908_mtp_quant import (
+    mark_draft_w8a16,
+    mtp_quant_experts_bits,
+    mtp_quant_experts_gs,
+    mtp_quant_mode,
+    mtp_quant_shared_expert_w4,
+    quantize_draft_weights,
+)
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
 from .model import (
@@ -116,6 +125,71 @@ def _remap_mtp_weight_name(name: str) -> str | None:
     return None
 
 
+logger = init_logger(__name__)
+
+
+def _mtp_checkpoint_is_unquantized(vllm_config: VllmConfig) -> bool:
+    import json
+    import os
+
+    force = os.environ.get("VLLM_MTP_FORCE_UNQUANT")
+    if force is not None:
+        return force == "1"
+    idx = os.path.join(vllm_config.model_config.model, "model.safetensors.index.json")
+    if not os.path.isfile(idx):
+        return False
+    try:
+        with open(idx) as f:
+            names = list(json.load(f)["weight_map"].keys())
+    except Exception:  # unreadable index: keep the default behaviour
+        return False
+    mtp = [n for n in names if n.startswith("mtp.") or n.startswith("model.mtp.")]
+    if not mtp:
+        return False
+    return not any(
+        ("qweight" in n or "weight_packed" in n or ".scales" in n) for n in mtp
+    )
+
+
+def _configure_mtp_rtn_quant_config(quant_config, mtp_start_layer_idx: int, bits: int):
+    """Adapt the (deep-copied) target GPTQ config for a load-time RTN draft.
+
+    ``w4``: the config is used as-is for the experts (4-bit, group 32, sym == the
+    target's layout, so the gfx908 W4A8 HIP GEMV / shared-as-expert / fused
+    router all apply) and the shared expert is added to the quantized-module list
+    so it is built as a GPTQ linear like the target's.
+    ``w8moe``: the MoeWNA16 method reads ``full_config`` (bits / group_size), so a
+    modified copy selects int8 group-128 for the experts; the shared expert stays
+    bf16 (+ W8A16 opt-in).
+    """
+    import copy
+
+    qc = copy.deepcopy(quant_config)
+    mode = mtp_quant_mode()
+    gs = mtp_quant_experts_gs(bits)
+    full = dict(getattr(qc, "full_config", {}) or {})
+    if bits == 8:
+        full["bits"] = 8
+        full["group_size"] = gs
+        qc.full_config = full
+    elif mtp_quant_shared_expert_w4():
+        names = getattr(qc, "modules_in_block_to_quantize", None) or []
+        names = list(names)
+        prefix = f"mtp.layers.{mtp_start_layer_idx}.mlp.shared_expert"
+        names += [f"{prefix}.gate_proj", f"{prefix}.up_proj", f"{prefix}.down_proj"]
+        qc.modules_in_block_to_quantize = names
+    logger.info(
+        "qwen4_exp MTP: VLLM_GFX908_MTP_QUANT=%s -> "
+        "draft experts W%d gs%d (RTN at load), "
+        "shared expert %s, dense projections bf16 + W8A16 opt-in",
+        mode,
+        bits,
+        gs,
+        "W4 gs32 (RTN)" if mtp_quant_shared_expert_w4() else "bf16 + W8A16",
+    )
+    return qc
+
+
 def _make_draft_vllm_config(
     vllm_config: VllmConfig,
     mtp_start_layer_idx: int,
@@ -127,6 +201,36 @@ def _make_draft_vllm_config(
         raise ValueError("speculative_config.draft_model_config must be set")
 
     draft_quant_config = get_draft_quant_config(vllm_config)
+
+    # PTQ checkpoints (GPTQ/AWQ) usually leave the MTP draft layer unquantized
+    # without recording the exclusion; building it quantized then fails to
+    # place the plain `mtp.*` weights (FusedMoE expects w13_qweight). Detect
+    # from the checkpoint index and build the draft unquantized when no
+    # quantized `mtp.*` tensor exists. VLLM_MTP_FORCE_UNQUANT=0/1 overrides.
+    if (
+        draft_quant_config is not None
+        and draft_quant_config.get_name() in ("auto_gptq", "gptq", "awq")
+        and _mtp_checkpoint_is_unquantized(vllm_config)
+    ):
+        bits = mtp_quant_experts_bits()
+        if bits == 0:
+            logger.info(
+                "qwen4_exp MTP: checkpoint mtp.* weights are unquantized; "
+                "building the draft without quant_config"
+            )
+            draft_quant_config = None
+        else:
+            # VLLM_GFX908_MTP_QUANT=w4|w8moe: keep the target's GPTQ config so the
+            # draft's RoutedExperts are built as MoeWNA16 (W4 gs32 / int8 gs128)
+            # and fed load-time RTN tensors in the GPTQ layout (see
+            # gfx908_mtp_quant.quantize_draft_weights).  The dense draft
+            # projections stay unquantized: their `mtp.*` prefixes are not in the
+            # checkpoint-derived modules_in_block_to_quantize list, so
+            # get_linear_quant_method() returns UnquantizedLinearMethod for them
+            # (the W8A16 opt-in handles those, see mark_draft_w8a16).
+            draft_quant_config = _configure_mtp_rtn_quant_config(
+                draft_quant_config, mtp_start_layer_idx, bits
+            )
 
     # inject packed and ignored modules to the quantization config of draft model
     if draft_quant_config is not None:
@@ -267,6 +371,8 @@ class Qwen4ExpMultiTokenPredictor(nn.Module):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], self.hidden_size * self.hc_count
         )
+
+        mark_draft_w8a16(self)
 
     def _iter_qsa_attentions(self):
         """Yield MTP attention modules that own a QSA indexer."""
@@ -490,7 +596,9 @@ class Qwen4ExpMTP(nn.Module, SupportsHCSP, SupportsPP, Qwen4ExpMixtureOfExperts)
             self,
             ignore_unexpected_suffixes=_QWEN4_EXP_IGNORED_MISSING_SUFFIXES.copy(),
         )
-        return loader.load_weights(remap_weight_names(), mapper=mapper)
+        return loader.load_weights(
+            quantize_draft_weights(remap_weight_names()), mapper=mapper
+        )
 
 
 __all__ = ["Qwen4ExpMTP", "Qwen4ExpMultiTokenPredictor"]

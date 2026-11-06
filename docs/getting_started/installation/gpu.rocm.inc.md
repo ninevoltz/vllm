@@ -388,12 +388,39 @@ in `hipMemcpyWithStream` on this host. Set `HSA_ENABLE_SDMA=1` to opt back
 into the driver copy engines; see the [ROCR runtime environment variables](https://rocm.docs.amd.com/projects/ROCR-Runtime/en/docs-6.1.1/environment_variables.html).
 
 For Qwen4Exp checkpoints whose n-gram table exceeds available host memory,
-`--engram-config '{"disk_offload":true}' --enforce-eager` keeps the table in
-its checkpoint files and reads only the requested rows. The AMD disk path
-requires eager execution and file-backed safetensors loading. It preserves
+`--engram-config '{"disk_offload":true}'` keeps the table in its checkpoint
+files and reads only the requested rows. The V2 model runner stages these rows
+before graph replay, allowing full decode graphs with file-backed safetensors
+loading. It preserves
 stored BF16 rows without quantizing the embedding table. Disk throughput and
 page-cache capacity affect performance. Keep the checkpoint files available
 for the entire server lifetime.
+
+The launcher `tools/mi100/serve_qwen4_exp.sh <checkpoint>` enables K=3 MTP,
+load-time W4 draft experts, W8A16 dense projections, fused hyperconnection and
+GDN kernels, tiled QSA prefill, and push all-reduce on four MI100s. It retains
+vision/video and the Qwen XML automatic tool parser. Set `MI100_MTP=0` for a
+comparison without speculation. Draft quantization changes the proposal model;
+the target still verifies its proposals with vLLM's rejection sampler.
+
+The launcher stores HIP extension binaries in
+`$MI100_ENV_ROOT/extensions` and uses the virtual environment under that root.
+Its 4 GiB static KV budget was measured with this checkpoint at TP4 and one
+sequence; other checkpoints require their own memory measurement. This avoids
+the extensible cache's conservative ROCm warmup reserve. It does not pin the
+95 GiB PLE table, so host RAM and storage remain relevant to throughput.
+
+The launcher's optimization variables are opt-in outside the script:
+
+| Variables | Purpose |
+| --- | --- |
+| `VLLM_GFX908_MTP_QUANT=w4` | Quantize the checkpoint's BF16 draft experts while loading. |
+| `VLLM_GFX908_W8A16=1`, `VLLM_GFX908_W4A8=1` | Enable MI100 dense and expert kernels. |
+| `VLLM_GFX908_HC_W8=1`, `VLLM_GFX908_HC_W8_FREE=0`, `VLLM_GFX908_SMALLM_HC_W8=1` | Enable the W8 hyperconnection chain while retaining BF16 masters. |
+| `VLLM_GFX908_GDN_FUSED=1`, `VLLM_GFX908_GDN_FUSED_SPEC=1` | Fuse GDN decode and speculative verification. |
+| `VLLM_GFX908_PUSH_AR=1`, `VLLM_GFX908_CUSTOM_AR_MAX_SIZE_MB=2` | Use push reductions for eligible BF16 messages and RCCL for larger work. |
+| `VLLM_GFX908_QSA_PREFILL_TILED=1`, `VLLM_GFX908_QSA_NUM_COLUMNS=1`, `VLLM_GFX908_W4_DEQUANT_LARGE_M=1` | Reduce prefill attention and projection overhead. |
+| `VLLM_GFX908_HIP_BUILD_DIR` | Select the native extension build/cache directory. |
 
 Set `--max-model-len 262144` only when the checkpoint declares that context
 limit and sufficient KV-cache memory is available. The configuration limit

@@ -1298,7 +1298,9 @@ def _build_custom_ops() -> bool:
 
 def get_rocm_version():
     # Get the Rocm version from the ROCM_HOME/bin/librocm-core.so
-    # see https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
+    # see
+    # https://github.com/ROCm/rocm-core/blob/d11f5c20d500f729c393680a01fa902ebf92094b/rocm_version.cpp#L21
+
     try:
         if ROCM_HOME is None:
             return None
@@ -1333,7 +1335,8 @@ def get_rocm_version():
 def get_nvcc_cuda_version() -> Version:
     """Get the CUDA version from nvcc.
 
-    Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
+    Adapted from
+    https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
     """
     assert CUDA_HOME is not None, "CUDA_HOME is not set"
     nvcc_output = subprocess.check_output(
@@ -1621,6 +1624,11 @@ package_data = {
     "vllm": [
         "py.typed",
         "libs/*.so*",
+        "distributed/device_communicators/csrc/gfx908_*",
+        "model_executor/layers/csrc/gfx908_*",
+        "model_executor/layers/fused_moe/csrc/gfx908_*",
+        "model_executor/layers/mamba/gdn/csrc/gfx908_*",
+        "models/qwen4_exp/amd/csrc/gfx908_*",
         "model_executor/layers/fused_moe/configs/*.json",
         # Tuned kernel configs must be explicit: the setuptools-scm git
         # file-finder is inactive when building from a .git-less tree
@@ -1753,4 +1761,5 @@ setup(
     },
     cmdclass=cmdclass,
     package_data=package_data,
+    exclude_package_data={"vllm": ["**/csrc/gfx908_*_hip*"]},
 )

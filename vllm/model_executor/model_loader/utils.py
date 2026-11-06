@@ -210,6 +210,16 @@ def process_weights_after_loading(
 
     finalize_model_weights(model, target_device)
 
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx908
+
+        if on_gfx908():
+            from vllm.model_executor.layers.gfx908_w8a16 import prepare_w8a16_lm_heads
+
+            prepare_w8a16_lm_heads(model)
+
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
     if model_config.quantization == "torchao":

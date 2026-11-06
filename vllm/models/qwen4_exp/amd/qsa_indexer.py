@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -349,6 +350,23 @@ class QSAIndexer(nn.Module):
         )
         return q, main_outputs
 
+    def _qsa_num_columns(self, metadata: QSAIndexerMetadata) -> int | None:
+        """gfx908: bound the indexer scorer's columns to the batch's real
+        context (VLLM_GFX908_QSA_NUM_COLUMNS=1) instead of max_model_len/4.
+        Under graph capture max_seq_len is the capture's dummy value, so the
+        captured decode graphs keep the full width; eager prefill shrinks."""
+        if os.environ.get("VLLM_GFX908_QSA_NUM_COLUMNS", "0") != "1":
+            return None
+        max_seq_len = int(getattr(metadata, "max_seq_len", 0) or 0)
+        if max_seq_len <= 0 or torch.cuda.is_current_stream_capturing():
+            return None
+        capacity = (
+            metadata.block_table.shape[1] * self.compressed_key_cache.kv_cache.shape[1]
+        )
+        cols = (max_seq_len + self.compress_ratio - 1) // self.compress_ratio
+        cols = ((cols + 63) // 64) * 64
+        return min(capacity, max(cols, 64))
+
     def _select(
         self,
         q: torch.Tensor,
@@ -367,6 +385,7 @@ class QSAIndexer(nn.Module):
             self.token_topk,
             self.compress_ratio,
             out,
+            num_columns=self._qsa_num_columns(metadata),
         )
 
     def forward(

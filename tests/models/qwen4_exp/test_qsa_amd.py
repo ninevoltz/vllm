@@ -526,3 +526,64 @@ def test_qsa_impl_constructs_with_fp8_kv(kv_cache_dtype: str) -> None:
         kv_cache_dtype=kv_cache_dtype,
     )
     assert impl.kv_cache_dtype == kv_cache_dtype
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("context_len", [128, 4096])
+def test_qsa_tiled_prefill_matches_sparse_reference(context_len: int) -> None:
+    """Ragged TP4 prefill preserves sparse selection and causal boundaries."""
+    torch.manual_seed(42)
+    device = "cuda"
+    page_size, head_dim = 16, 128
+    pages = context_len // page_size
+    q = torch.randn(18, 6, head_dim, device=device, dtype=torch.bfloat16)
+    k = torch.randn(
+        2 * pages, page_size, 1, head_dim, device=device, dtype=torch.bfloat16
+    )
+    v = torch.randn_like(k)
+    block_table = torch.arange(2 * pages, device=device, dtype=torch.int32).view(
+        2, pages
+    )
+    starts = torch.tensor([0, 7, 18], device=device, dtype=torch.int32)
+    positions = torch.cat(
+        [
+            torch.arange(context_len - 7, context_len, device=device),
+            torch.arange(context_len - 11, context_len, device=device),
+        ]
+    ).to(torch.int32)
+    owners = torch.tensor([0] * 7 + [1] * 11, device=device, dtype=torch.int32)
+    fixed = torch.tensor([0, 1, 2, 3, 8, 9, 10, 11], device=device).expand(18, -1)
+    tail = positions[:, None] // 4 * 4 + torch.arange(4, device=device)
+    tail = torch.where(tail <= positions[:, None], tail, -1)
+    selected = torch.cat([fixed, tail], dim=-1).to(torch.int32)
+    actual = torch.empty_like(q)
+    qsa_ops.qsa_prefill_tiled_attention(
+        q, k, v, selected, block_table, positions, starts, context_len, 4, actual
+    )
+    expected = _qsa_sparse_paged_attention_reference(
+        q, k, v, selected, block_table, owners, head_dim**-0.5
+    )
+    torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("table_width", [64, 4096])
+def test_qsa_scorer_masks_unused_long_context_capacity(table_width: int) -> None:
+    """Captured long-context capacity must not change a short request's scores."""
+    torch.manual_seed(43)
+    q = torch.randn(4, 4, 128, device="cuda", dtype=torch.bfloat16)
+    k = torch.randn(1, 16, 1, 128, device="cuda", dtype=torch.bfloat16)
+    table = torch.zeros(4, table_width, device="cuda", dtype=torch.int32)
+    owners = torch.arange(4, device="cuda", dtype=torch.int32)
+    positions = torch.tensor([0, 123, 127, 131], device="cuda", dtype=torch.int32)
+    lengths = torch.full((4,), 256, device="cuda", dtype=torch.int32)
+    actual, visible = qsa_ops.qsa_mqa_paged(q, k, table, owners, positions, lengths, 4)
+    assert visible.tolist() == [0, 31, 32, 33]
+    for row, count in enumerate(visible.tolist()):
+        assert torch.isneginf(actual[row, count:]).all()
+        if count:
+            keys = k[0, :, 0].float().cpu().repeat((count + 15) // 16, 1)[:count]
+            scores = (q[row].float().cpu() @ keys.T).relu().sum(0) / math.sqrt(128)
+            torch.testing.assert_close(
+                actual[row, :count].cpu(), scores, rtol=1e-5, atol=1e-5
+            )

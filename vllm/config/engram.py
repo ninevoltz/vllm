@@ -94,8 +94,6 @@ class EngramConfig:
                 raise ValueError(
                     "disk_offload requires a Qwen4Exp model on CUDA or ROCm"
                 )
-            if current_platform.is_rocm() and not model_config.enforce_eager:
-                raise ValueError("ROCm PLE disk_offload requires enforce_eager=True")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""

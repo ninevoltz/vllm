@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import ClassVar, cast
 
 import torch
@@ -297,6 +298,56 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
             self._slocks,
         )
 
+    def forward_qsa_tiled(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: Qwen4ExpQSAMetadata,
+        output: torch.Tensor,
+        query_positions: torch.Tensor,
+        compress_ratio: int,
+        query_start_loc: torch.Tensor,
+        max_seq_len: int,
+    ) -> torch.Tensor:
+        """Sparse QSA with the query dimension tiled (prefill-shaped batches).
+
+        Same selection and same math as :meth:`forward_qsa`; the kernel tiles
+        ``BLOCK_Q`` consecutive queries of a request into the MFMA M dimension
+        and walks their shared causal key range once instead of re-gathering a
+        2051-wide index list per token.  Only valid when every row's logical
+        position is known (prefill), which is why the gate requires
+        ``max_query_len > 1``.
+        """
+        num_tokens = attn_metadata.num_actual_tokens
+        output.zero_()
+        if num_tokens == 0:
+            return output
+        topk_buffer = getattr(layer, "topk_indices_buffer", None)
+        if topk_buffer is None:
+            raise RuntimeError("QSA owner did not provide its top-k buffer")
+        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        key_cache = canonicalize_singleton_dim_strides(key_cache)
+        value_cache = canonicalize_singleton_dim_strides(value_cache)
+        if key_cache.dtype != torch.bfloat16 or query.dtype != torch.bfloat16:
+            raise NotImplementedError("Qwen4Exp QSA requires BF16 Q/K/V")
+
+        from .ops.qsa import qsa_prefill_tiled_attention
+
+        qsa_prefill_tiled_attention(
+            query[:num_tokens],
+            key_cache,
+            value_cache,
+            topk_buffer[:num_tokens],
+            attn_metadata.block_table,
+            query_positions[:num_tokens],
+            query_start_loc,
+            max_seq_len,
+            compress_ratio,
+            output[:num_tokens],
+        )
+        return output
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -480,6 +531,10 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         )
 
         self.layer_name = f"{prefix}.attn"
+        speculative = vllm_config.speculative_config
+        self._gfx908_decode_len = (
+            1 if speculative is None else speculative.num_speculative_tokens + 1
+        )
         self.attn_type = AttentionType.DECODER
         self.kv_cache_dtype = cache_dtype
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
@@ -617,6 +672,26 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
             assert gate is not None
             gate[num_tokens:].zero_()
         assert query is not None
+        if (
+            os.environ.get("VLLM_GFX908_QSA_PREFILL_TILED", "0") == "1"
+            and main_metadata.max_query_len > self._gfx908_decode_len
+            and impl.octave_fmt is None
+            and query.dtype == torch.bfloat16
+            and self.kv_cache.dtype == torch.bfloat16
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            impl.forward_qsa_tiled(
+                self,
+                query,
+                self.kv_cache,
+                main_metadata,
+                output,
+                indexer_metadata.logical_positions,
+                self.indexer.compress_ratio,
+                indexer_metadata.query_start_loc,
+                indexer_metadata.max_seq_len,
+            )
+            return
         impl.forward(
             self,
             query,

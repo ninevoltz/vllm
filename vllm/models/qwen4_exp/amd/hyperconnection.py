@@ -123,6 +123,54 @@ class GatedResidual(nn.Module):
             prefix=maybe_prefix(prefix, "input_mix_weight_up"),
             return_bias=False,
         )
+        self._gfx908_hc_fused = False
+        # TP sharding of the mix over tokens (VLLM_GFX908_HC_SHARD=1, default
+        # off). For use_combine=True the hook lives inside the fused custom op
+        # (gfx908_hc_fused._hc_mix_impl); the final mixer has no fused path, so
+        # it gets its own opaque op below.
+        from .gfx908_hc_fused import hc_fused_enabled, hc_shard_enabled
+
+        self._gfx908_hc_shard = hc_shard_enabled()
+        # Push-AR consumer fused into this module's combine (+norm):
+        # VLLM_GFX908_HC_AR_FUSED=1 (default off).  Static per module.
+        from .gfx908_hc_ar_fused import hc_ar_fused_enabled
+
+        self._gfx908_hc_ar_fused = hc_ar_fused_enabled() and config.hc_count == 4
+        # Final mixer on the W8 fused chain: VLLM_GFX908_HC_FINAL_W8=1 (default off).
+        # Quantizes (and, like the combining mixers, may release the bf16 of) this
+        # module's two mix weights at load time, so every call must then go through
+        # the opaque hc_final_mix op, which is what _gfx908_hc_final_op_applies routes.
+        self._gfx908_hc_final_w8 = False
+        if not use_combine:
+            from .gfx908_hc_fused import hc_final_w8_enabled, install_hc_w8_prepare
+
+            self._gfx908_hc_final_w8 = hc_final_w8_enabled()
+            if self._gfx908_hc_final_w8:
+                install_hc_w8_prepare(self)
+        if use_combine:
+            from .gfx908_hc_fused import (
+                hc_w4_enabled,
+                hc_w8_enabled,
+                install_hc_w8_prepare,
+            )
+
+            self._gfx908_hc_fused = hc_fused_enabled()
+            if self._gfx908_hc_shard and not self._gfx908_hc_fused:
+                from vllm.logger import init_logger
+
+                init_logger(__name__).warning_once(
+                    "gfx908: VLLM_GFX908_HC_SHARD=1 has no effect on the "
+                    "combining HC modules while the fused HC path is off"
+                )
+            if self._gfx908_hc_fused and (hc_w4_enabled() or hc_w8_enabled()):
+                # Wraps the two mix Linears' process_weights_after_loading so the
+                # int8 (or W4, under VLLM_GFX908_W4_LOADTIME) copies are built and
+                # the bf16 masters released at load time, before torch.compile and
+                # before any cudagraph capture.
+                install_hc_w8_prepare(self)
+
+    # VLLM_GFX908_PUSH_AR_FUSED_PRODUCER: which producer the fused mix arms (0 = none).
+    _gfx908_arm_kind: int = 0
 
     def mix(
         self, hidden_states: torch.Tensor
@@ -134,17 +182,24 @@ class GatedResidual(nn.Module):
             self.hc_count,
         )
 
+        if self.use_combine and self._gfx908_hc_fused_applies(xn):
+            block_input, injection = self._gfx908_hc_fused_mix(xn)
+            return hidden_states, block_input, injection
+
+        if not self.use_combine and self._gfx908_hc_final_op_applies(xn):
+            return hidden_states, self._gfx908_hc_shard_final_mix(xn), None
+
         if self.use_combine:
             # produce injection logits for combine
             split_sizes = [self.hc_lowrank, self.hc_count, self.pad_size]
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lowrank, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
         else:
-            lowrank = self.input_mix_weight_down(xn)
+            lora = self.input_mix_weight_down(xn)
             injection = None
 
-        lowrank = hc_silu(lowrank, self.hc_count)
-        gate = self.input_mix_weight_up(lowrank)  # [M, D]
+        lora = hc_silu(lora, self.hc_count)
+        gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection
@@ -161,29 +216,97 @@ class GatedResidual(nn.Module):
         block's mix. Its combine with ``block_output`` is fused with this
         module's input RMSNorm.
         """
-        hidden_states, xn = hc_combine_norm(
-            hidden_states,
-            prev_block_output,
-            prev_injection,
-            self.hc_norm.weight,
-            self.config.rms_norm_eps,
-            self.hc_count,
-        )
+        if self._gfx908_hc_ar_fused:
+            from .gfx908_hc_ar_fused import hc_combine_norm_ar
+
+            hidden_states, xn = hc_combine_norm_ar(
+                hidden_states,
+                prev_block_output,
+                prev_injection,
+                self.hc_norm.weight,
+                self.config.rms_norm_eps,
+                self.hc_count,
+            )
+        else:
+            hidden_states, xn = hc_combine_norm(
+                hidden_states,
+                prev_block_output,
+                prev_injection,
+                self.hc_norm.weight,
+                self.config.rms_norm_eps,
+                self.hc_count,
+            )
+
+        if self.use_combine and self._gfx908_hc_fused_applies(xn):
+            block_input, injection = self._gfx908_hc_fused_mix(xn)
+            return hidden_states, block_input, injection
+
+        if not self.use_combine and self._gfx908_hc_final_op_applies(xn):
+            return hidden_states, self._gfx908_hc_shard_final_mix(xn), None
 
         if self.use_combine:
             # produce injection logits for combine
             split_sizes = [self.hc_lowrank, self.hc_count, self.pad_size]
             down_and_injection = self.input_mix_weight_down_block_inject(xn)
-            lowrank, injection, _ = down_and_injection.split(split_sizes, dim=-1)
+            lora, injection, _ = down_and_injection.split(split_sizes, dim=-1)
         else:
-            lowrank = self.input_mix_weight_down(xn)
+            lora = self.input_mix_weight_down(xn)
             injection = None
 
-        lowrank = hc_silu(lowrank, self.hc_count)
-        gate = self.input_mix_weight_up(lowrank)  # [M, D]
+        lora = hc_silu(lora, self.hc_count)
+        gate = self.input_mix_weight_up(lora)  # [M, D]
         block_input = hc_gate_mix(xn, gate, self.hc_count)
 
         return hidden_states, block_input, injection
+
+    # -- gfx908 fused projections (wvSplitK copy with silu / gate-mix epilogues) --
+    def _gfx908_hc_fused_applies(self, xn: torch.Tensor) -> bool:
+        # Plain attribute checks only: this runs under torch.compile tracing
+        # (M is symbolic, and the extension loader is a dynamo-skipped call).
+        # The op dispatches on the real M at capture/run time.
+        return xn.dtype == torch.bfloat16 and self._gfx908_hc_fused
+
+    def _gfx908_hc_shard_applies(self, xn: torch.Tensor) -> bool:
+        # Plain attribute check only (same rule as the fused gate): the real M
+        # dispatch happens inside the custom op.
+        return xn.dtype == torch.bfloat16 and self._gfx908_hc_shard
+
+    def _gfx908_hc_final_op_applies(self, xn: torch.Tensor) -> bool:
+        # Final mixer through the opaque op (token sharding and/or the W8 chain); plain
+        # attribute checks only, the real M dispatch happens inside the op.
+        return xn.dtype == torch.bfloat16 and (
+            self._gfx908_hc_shard or self._gfx908_hc_final_w8
+        )
+
+    def _gfx908_hc_shard_final_mix(self, xn: torch.Tensor) -> torch.Tensor:
+        from .gfx908_hc_fused import hc_final_mix
+
+        return hc_final_mix(
+            xn,
+            self.input_mix_weight_down.weight,
+            self.input_mix_weight_up.weight,
+            self.hc_count,
+            self.hc_lowrank,
+            self.hidden_size,
+        )
+
+    def _gfx908_hc_fused_mix(self, xn: torch.Tensor):
+        from .gfx908_hc_fused import hc_fused_mix
+
+        return hc_fused_mix(
+            xn,
+            self.input_mix_weight_down_block_inject.weight,
+            self.input_mix_weight_up.weight,
+            self.hc_count,
+            self.hc_lowrank,
+            self.hidden_size,
+            # VLLM_GFX908_PUSH_AR_FUSED_PRODUCER: arm the block this mix feeds (0 =
+            # never).
+            # Set by Qwen4ExpDecoderLayer; the arm has to happen inside the op because
+            # this
+            # method is traced away by torch.compile (see gfx908_hc_fused.ARM_ATTN).
+            self._gfx908_arm_kind,
+        )
 
     def combine(
         self,
@@ -191,6 +314,10 @@ class GatedResidual(nn.Module):
         block_output: torch.Tensor,
         injection: torch.Tensor,
     ) -> torch.Tensor:
+        if self._gfx908_hc_ar_fused:
+            from .gfx908_hc_ar_fused import hc_combine_ar
+
+            return hc_combine_ar(hidden_states, block_output, injection, self.hc_count)
         return hc_combine(hidden_states, block_output, injection, self.hc_count)
 
     @property
