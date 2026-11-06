@@ -79,7 +79,7 @@ def triton_w4a16_gemm_kernel(
     pid_n = tl.program_id(1)
 
     # Row/col offsets for this tile
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    offs_m = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
     # b/zeros are stored with N packed: N//8 int32 columns per K row
@@ -533,7 +533,14 @@ def _gfx908_w4a16_gemm_op(
     group_size: int,
     zp_bias: int,
 ) -> torch.Tensor:
-    return triton_w4a16_gemm(a, b_q, scales, None, group_size, zp_bias)
+    return triton_w4a16_gemm(
+        a=a,
+        b_q=b_q,
+        scales=scales,
+        qzeros=None,
+        group_size=group_size,
+        zp_bias=zp_bias,
+    )
 
 
 def _gfx908_w4a16_gemm_op_fake(
