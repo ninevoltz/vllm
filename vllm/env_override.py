@@ -117,6 +117,11 @@ def _maybe_promote_torch_symbols_for_rocm():
         import ctypes
         import glob
 
+        # ROCm 7.14 also exposes LLVM through this dependency graph. Load
+        # Triton locally first so its LLVM static initializers cannot bind
+        # to the incompatible symbols promoted with libtorch_cpu.
+        import triton._C.libtriton  # noqa: F401
+
         torch_root = _get_torch_root()
         if not torch_root:
             return

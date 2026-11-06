@@ -625,3 +625,25 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(VLLMValidationError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+def test_triton_import_after_vllm_in_fresh_process():
+    """ROCm's global profiling symbols must not corrupt Triton's LLVM loader."""
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import vllm; import triton; from vllm.config import VllmConfig; "
+                "print('imports completed')"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=60,
+    )
+    assert "imports completed" in result.stdout

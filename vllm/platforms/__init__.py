@@ -55,6 +55,11 @@ def tpu_platform_plugin() -> str | None:
 
 
 def cuda_platform_plugin() -> str | None:
+    import torch
+
+    if torch.version.hip is not None:
+        return None
+
     is_cuda = False
     logger.debug("Checking if CUDA platform is available.")
     try:

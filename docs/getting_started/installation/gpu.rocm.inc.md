@@ -362,6 +362,38 @@ You can find more information about vLLM's wheels in
     - For MI300x (gfx942) users, to achieve optimal performance, please refer to [MI300x tuning guide](https://rocm.docs.amd.com/en/latest/how-to/tuning-guides/mi300x/index.html) for performance optimization and tuning tips on system and workflow level.
       For vLLM, please refer to [vLLM performance optimization](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/vllm-optimization.html).
 
+### MI100 (gfx908) source builds
+
+Build for `gfx908` explicitly with `PYTORCH_ROCM_ARCH=gfx908` and
+`GPU_ARCHS=gfx908`. Install a ROCm PyTorch wheel that includes gfx908, and
+install AMD SMI's Python bindings in the same virtual environment. On hosts
+that also contain an NVIDIA GPU, the ROCm PyTorch build selects the ROCm
+platform.
+
+When the host also has distribution-packaged libtorch libraries, point CMake
+at the virtual environment's `libtorch.so` and `libc10.so` using
+`CMAKE_ARGS="-DTORCH_LIBRARY=<venv>/lib/python3.12/site-packages/torch/lib/libtorch.so -Dc10_LIBRARY=<venv>/lib/python3.12/site-packages/torch/lib/libc10.so"`.
+Mixing these libraries with system libtorch can cause a shutdown abort.
+
+MI100 uses the tuned Exllama path for compatible FP16 GPTQ linears and retains
+Triton fallbacks for BF16 models. Vision attention can use Torch SDPA.
+
+For Qwen4Exp checkpoints whose n-gram table exceeds available host memory,
+`--engram-config '{"disk_offload":true}' --enforce-eager` keeps the table in
+its checkpoint files and reads only the requested rows. The AMD disk path
+requires eager execution and file-backed safetensors loading. It preserves
+stored BF16 rows without quantizing the embedding table. Disk throughput and
+page-cache capacity affect performance. Keep the checkpoint files available
+for the entire server lifetime.
+
+Set `--max-model-len 262144` only when the checkpoint declares that context
+limit and sufficient KV-cache memory is available. The configuration limit
+alone does not establish long-context accuracy. Run
+`tools/mi100/validate_multimodal_context.py <checkpoint>` against the local
+server to check text, image and video generation, then retrieval with explicit
+8K, 32K, 128K and 262144-token budgets. The largest request reserves 32 tokens
+for output and submits 262112 prompt tokens.
+
 --8<-- [end:build-wheel-from-source]
 --8<-- [start:pre-built-images]
 

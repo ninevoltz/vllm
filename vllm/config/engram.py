@@ -90,8 +90,12 @@ class EngramConfig:
         if self.disk_offload:
             from vllm.platforms import current_platform
 
-            if field != "ple_layer_ids" or not current_platform.is_cuda():
-                raise ValueError("disk_offload requires a Qwen4Exp model on CUDA")
+            if field != "ple_layer_ids" or not current_platform.is_cuda_alike():
+                raise ValueError(
+                    "disk_offload requires a Qwen4Exp model on CUDA or ROCm"
+                )
+            if current_platform.is_rocm() and not model_config.enforce_eager:
+                raise ValueError("ROCm PLE disk_offload requires enforce_eager=True")
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""

@@ -2830,3 +2830,55 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
     )
     expected = loaded_weight[ngram_ids.cpu()].flatten(-2).to(device)
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_amd_disk_ple_loads_exact_checkpoint_rows(
+    tmp_path, dist_init, default_vllm_config, device
+):
+    """AMD disk loading preserves BF16 rows without allocating the full table."""
+    from vllm.config.engram import EngramConfig
+
+    default_vllm_config.engram_config = EngramConfig(disk_offload=True)
+    config = Qwen4ExpTextConfig(
+        ngram_size=2,
+        heads_per_ngram=2,
+        eos_token_id=0,
+        vocab_size=64,
+        split_ngram_parts=4,
+        ngram_vocab_size_base=8,
+        make_ngram_vocab_size_divisible_by=1,
+    )
+    path = tmp_path / "ple.safetensors"
+    _save_ple_checkpoint(path, "bf16")
+    with torch.device(device):
+        module = amd_ple_layer.Qwen4ExpNGramEmbedding(
+            config,
+            embedding_dim=64,
+            ple_dense_layer_id=0,
+            max_total_tokens=4,
+            prefix="test.ple_embedding",
+            layer_name="test.ple",
+            params_dtype=torch.bfloat16,
+        )
+    embedding = module.ngram_embedding
+    with safe_open(path, framework="pt") as checkpoint:
+        module.load_weights(
+            (name, checkpoint.get_tensor(name))
+            for name in checkpoint.keys()  # noqa: SIM118
+        )
+        embedding.quant_method.process_weights_after_loading(embedding)
+        table = torch.cat(
+            [
+                checkpoint.get_tensor(f"ngram_embedding.shard_{i}.weight")
+                for i in range(4)
+            ]
+        )
+    assert embedding.weight.numel() == 0
+    ids = torch.tensor([[0, 23], [5, 11], [13, 13], [23, 1]], device=device)
+    embedding.copy_ids_to_host(ids)
+    if device == "cuda":
+        torch.accelerator.synchronize()
+    embedding.stage_rows(4)
+    actual = embedding.staged_rows(4).cpu()
+    torch.testing.assert_close(actual, table[ids.cpu()].flatten(-2), rtol=0, atol=0)

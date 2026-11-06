@@ -462,7 +462,7 @@ def rocm_unquantized_gemm_impl(
 
         return linear_batch_invariant(x, weight, bias)
 
-    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx11, on_gfx908, on_gfx950
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -508,7 +508,7 @@ def rocm_unquantized_gemm_impl(
 
     skinny_gemm_enabled = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and (on_gfx9() or on_gfx1x())
+        and (on_gfx9() or on_gfx908() or on_gfx1x())
         # build (gfx9/gfx11 ISA); fall back to torch GEMM there.
         # TODO GFX1250: Include once skinny GEMM is supported on gfx1250
         and x.dtype in [torch.float16, torch.bfloat16]
@@ -925,7 +925,7 @@ def rocm_unquantized_gemm_gfx908_impl(
         and weight.is_contiguous()
     )
     if skinny_ok:
-        x_view = x.reshape(-1, x.size(-1))
+        x_view = x.reshape(-1, x.size(-1)).contiguous()
         if n == 1 and m % 4 == 0 and k <= 8192 and bias is None:
             if debug:
                 import sys as _sys

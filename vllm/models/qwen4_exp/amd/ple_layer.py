@@ -29,6 +29,7 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
@@ -44,6 +45,7 @@ from ..common.ngram_embedding import (
     Qwen4ExpPLEPinnedHostEmbedding,
 )
 from ..common.ops.ple import ple_conv, ple_gate, ple_ngram_ids
+from ..nvidia.ngram_embedding import Qwen4ExpPLEDiskOffloadEmbedding
 
 logger = init_logger(__name__)
 
@@ -259,7 +261,10 @@ class Qwen4ExpNGramEmbedding(nn.Module):
             )
         engram_config = get_current_vllm_config().engram_config
         embedding_cls = (
-            Qwen4ExpPLEPinnedHostEmbedding
+            Qwen4ExpPLEDiskOffloadEmbedding
+            if engram_config is not None
+            and getattr(engram_config, "disk_offload", False)
+            else Qwen4ExpPLEPinnedHostEmbedding
             if engram_config is not None and engram_config.cpu_offload
             else Qwen4ExpPLEDeviceEmbedding
         )
@@ -267,6 +272,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         self.use_reduce_scatter = (
             self.use_sequence_parallel
             and get_etp_group().world_size == get_tp_group().world_size
+            and embedding_cls is not Qwen4ExpPLEDiskOffloadEmbedding
         )
         self.ngram_embedding = embedding_cls(
             padded_vocab_size,
@@ -399,11 +405,16 @@ class Qwen4ExpNGramEmbedding(nn.Module):
                         f"expected {expected_shape}, got "
                         f"{tuple(loaded_weight.shape)}"
                     )
-                embedding.weight.weight_loader(
-                    embedding.weight,
-                    loaded_weight,
-                    checkpoint_start=checkpoint_start,
-                )
+                if isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
+                    embedding.accept_checkpoint_shard(
+                        shard_index, loaded_weight, shard_size, "weight"
+                    )
+                else:
+                    embedding.weight.weight_loader(
+                        embedding.weight,
+                        loaded_weight,
+                        checkpoint_start=checkpoint_start,
+                    )
                 loaded.add("ngram_embedding.weight")
                 continue
             regular_weights.append((name, loaded_weight))
@@ -819,7 +830,15 @@ def qwen4_exp_amd_ple_ngram_embedding(
     layer = get_forward_context().no_compile_layers[layer_name]
     if not isinstance(layer, Qwen4ExpPLELayer):
         raise TypeError(f"{layer_name} is not a Qwen4Exp PLE owner")
-    result = layer.ple_embedding.ngram_embedding(ngram_ids).flatten(-2)
+    embedding = layer.ple_embedding.ngram_embedding
+    if isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
+        embedding.copy_ids_to_host(ngram_ids)
+        with gpu_sync_allowed():
+            torch.accelerator.current_stream().synchronize()
+        embedding.stage_rows(ngram_ids.shape[0])
+        result = embedding.staged_rows(ngram_ids.shape[0])
+    else:
+        result = embedding(ngram_ids).flatten(-2)
     output.copy_(result)
 
 

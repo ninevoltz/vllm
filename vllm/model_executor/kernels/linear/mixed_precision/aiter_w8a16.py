@@ -11,15 +11,6 @@ group sizes.
 import os
 
 import torch
-from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
-    gemm_a8w8_blockscale,
-)
-
-# AITER Triton kernels. Keep at module level to avoid repeated import overhead
-# inside the hot apply_weights path.
-from aiter.ops.triton.gemm.basic.gemm_a16w8_blockscale import (
-    gemm_a16w8_blockscale,
-)
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.parameter import BasevLLMParameter
@@ -27,6 +18,23 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
+
+
+def gemm_a8w8_blockscale(*args, **kwargs):
+    from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import (
+        gemm_a8w8_blockscale as impl,
+    )
+
+    return impl(*args, **kwargs)
+
+
+def gemm_a16w8_blockscale(*args, **kwargs):
+    from aiter.ops.triton.gemm.basic.gemm_a16w8_blockscale import (
+        gemm_a16w8_blockscale as impl,
+    )
+
+    return impl(*args, **kwargs)
+
 
 PREQUANT_ATTR = "_gfx908_prequant_stash"  # fused-quant stash (int8 fork); unused here
 
@@ -132,6 +140,11 @@ class AiterW8A16LinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        from vllm._aiter_ops import is_aiter_found_and_supported
+
+        if not is_aiter_found_and_supported():
+            return False, "AITER is not installed"
+
         if os.environ.get("VLLM_GFX908_W8A8", "0") != "1":
             return False, "AiterW8A16LinearKernel is opt-in (VLLM_GFX908_W8A8=1)"
 
