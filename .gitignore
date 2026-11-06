@@ -203,6 +203,11 @@ cython_debug/
 !.claude/skills/
 !.claude/skills/**
 
+# Local MI100 development files
+docs/plans/
+mi100-tests/
+nlzy-vllm-gfx906/
+
 # Codex
 .codex/
 
@@ -244,6 +249,9 @@ ep_kernels_workspace/
 !vllm/benchmarks/lib/
 !.buildkite/scripts/lib/
 
+# Separate project - has its own git repo
+mi100-ops/
+
 # Generated gRPC protobuf files (compiled at build time from vllm_engine.proto)
 vllm/grpc/vllm_engine_pb2.py
 vllm/grpc/vllm_engine_pb2_grpc.py
@@ -257,3 +265,10 @@ csrc/cpu/cpu_attn_dispatch_generated.h
 /.rocm-version/
 /.rocm-wheel/
 /.rocm-kernel-map/
+# Stage 5k inductor trace dump (Stage 5k fusion audit, regenerable)
+docs/mi100_decode_opt/stage5k_inductor_trace/
+
+# gfx908 kernel-tuning build snapshots (reproducible, ~100MB each)
+vllm/_C.abi3.so.*
+# Stale local build dirs
+build.stale*

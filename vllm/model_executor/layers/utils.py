@@ -3,6 +3,7 @@
 """Utility methods for model layers."""
 
 import functools
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -250,6 +251,10 @@ def use_aiter_triton_gemm(n, m, k, dtype):
         or (m == 128 and k == 2880)
         or (m == 640 and k == 2880)
         or (m == 2880 and k == 512)
+        # Qwen3.6-35B-A3B lm_head: M=1, N=62080 — AITER 1.74x vs rocBLAS w/ BEST_CFG
+        # (lm_head replicated across TP ranks, not column-split). Other unquantized
+        # shapes in this model lose to rocBLAS at AITER's ~50μs floor — keep them off.
+        or (m == 62080 and k == 2048)
     )
 
 
@@ -429,6 +434,24 @@ def lmhead_skinny_guard_permits(weight: torch.Tensor, n: int) -> bool:
     return False
 
 
+# gfx908 small-M tuning: AITER's default _get_config picks M_LEQ_64 for our shapes,
+# which wastes blocks at M=1. This M=1 N≥1024 K=2048 config wins ~1.74x for lm_head.
+_AITER_GEMM_M1_BEST_CFG = {
+    "BLOCK_SIZE_M": 16,
+    "BLOCK_SIZE_N": 64,
+    "BLOCK_SIZE_K": 128,
+    "GROUP_SIZE_M": 1,
+    "num_warps": 4,
+    "num_stages": 2,
+    "waves_per_eu": 2,
+    "matrix_instr_nonkdim": 16,
+    "cache_modifier": ".cg",
+    "NUM_KSPLIT": 1,
+    "SPLITK_BLOCK_SIZE": 2048,
+    "kpack": 1,
+}
+
+
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
@@ -475,6 +498,12 @@ def rocm_unquantized_gemm_impl(
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
+        if x.dtype != weight.dtype:
+            x = x.to(weight.dtype)
+        # gfx908: pass M=1 small-M config for lm_head shape (1.74x vs default config)
+        cfg = _AITER_GEMM_M1_BEST_CFG if n == 1 and m == 62080 and k == 2048 else None
+        if cfg is not None:
+            return gemm_a16w16(x, weight, bias, config=cfg)
         return gemm_a16w16(x, weight, bias)
 
     skinny_gemm_enabled = (
@@ -530,13 +559,15 @@ def rocm_unquantized_gemm_impl(
 
         return tgemm.mm(x, weight, bias)
 
+    if x.dtype != weight.dtype:
+        x = x.to(weight.dtype)
     return torch.nn.functional.linear(x, weight, bias)
 
 
 def rocm_unquantized_gemm_fake(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    return x.new_empty((*x.shape[:-1], weight.shape[0]))
+    return weight.new_empty((*x.shape[:-1], weight.shape[0]))
 
 
 def rocm_unquantized_gemm(
@@ -855,10 +886,170 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
+def rocm_unquantized_gemm_gfx908_impl(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """gfx908 dispatch implementation (registered as torch custom op below).
+
+    Routes through a `direct_register_custom_op` wrapper so torch.compile /
+    inductor sees one opaque graph node and does NOT inline this Python down
+    to `aten::mm` (rocBLAS). That ensures QKV/QKVZ/o_proj inside compiled model
+    forwards still hit our LLMM1/wvSplitK dispatch, not just the eager-path
+    MoE block / lm_head.
+
+    Dispatch priority on gfx908 for fp16/bf16 weight (k % 8 == 0):
+      1. LLMM1   for n==1, m % 4 == 0, k <= 8192, bias is None (fastest at M=1)
+      2. wvSplitK for m > 8 and 0 < n <= 4 (skinny-M decode)
+      3. AITER gemm_a16w16 for whitelisted lm_head shape (Stage 2)
+      4. F.linear fallback (rocBLAS for M >= 8)
+
+    Microbench (gfx908 single-GPU, 2026-04-24):
+      - LLMM1   2.1-2.7x faster than rocBLAS for our M=1 hot shapes
+      - wvSplitK 2.1-6.7x faster than rocBLAS (wins on (1, 1, 2048))
+      - LLMM1 also beats AITER for (1, 62080, 2048) lm_head: 244us vs 267us
+    """
+    n = x.numel() // x.size(-1)
+    m = weight.shape[0]
+    k = weight.shape[1]
+    debug = os.environ.get("VLLM_GFX908_DEBUG_DISPATCH") == "1"
+
+    # Skinny GEMM dispatch (PR adapted from larkinwc/vllm-gfx908#4 microbench).
+    # Required conditions for both: weight.is_contiguous() (LLMM1/wvSplitK
+    # assume contiguous), fp16/bf16 dtype, k % 8 == 0 (vectorized loads).
+    skinny_ok = (
+        x.dtype in (torch.float16, torch.bfloat16)
+        and weight.dtype in (torch.float16, torch.bfloat16)
+        and k % 8 == 0
+        and weight.is_contiguous()
+    )
+    if skinny_ok:
+        x_view = x.reshape(-1, x.size(-1))
+        if n == 1 and m % 4 == 0 and k <= 8192 and bias is None:
+            if debug:
+                import sys as _sys
+
+                print(f"[LLMM1] n={n} m={m} k={k}", file=_sys.stderr, flush=True)
+            if x.dtype != weight.dtype:
+                x_view = x_view.to(weight.dtype)
+            out = ops.LLMM1(weight, x_view, 4)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+        if m > 8 and 0 < n <= 4:
+            if debug:
+                import sys as _sys
+
+                print(f"[wvSplitK] n={n} m={m} k={k}", file=_sys.stderr, flush=True)
+            cu_count = num_compute_units()
+            if x.dtype != weight.dtype:
+                x_view = x_view.to(weight.dtype)
+            out = ops.wvSplitK(weight, x_view, cu_count, bias)
+            return out.reshape(*x.shape[:-1], weight.shape[0])
+
+    if use_aiter_triton_gemm(n, m, k, x.dtype):
+        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+        if debug:
+            import sys as _sys
+
+            print(
+                f"[AITER_DISPATCH] n={n} m={m} k={k} dtype={x.dtype}",
+                file=_sys.stderr,
+                flush=True,
+            )
+        if x.dtype != weight.dtype:
+            x = x.to(weight.dtype)
+        cfg = _AITER_GEMM_M1_BEST_CFG if n == 1 and m == 62080 and k == 2048 else None
+        if cfg is not None:
+            return gemm_a16w16(x, weight, bias, config=cfg)
+        return gemm_a16w16(x, weight, bias)
+    # rocBLAS fallback for M >= 8 (no skinny-GEMM applies). Now reachable
+    # from inside compiled forwards too (Stage 5h custom-op wrapper below).
+    return torch.nn.functional.linear(x, weight, bias)
+
+
+def rocm_unquantized_gemm_gfx908(
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """gfx908 dispatch — torch custom op wrapper.
+
+    Routes through `torch.ops.vllm.rocm_unquantized_gemm_gfx908` so inductor
+    treats it as a single opaque graph node. This is what makes the LLMM1 /
+    wvSplitK dispatch fire for QKV/QKVZ/o_proj inside compiled model forwards
+    (round-3 Stage 5h). Without this wrapping, inductor inlines our Python and
+    lowers the trailing `F.linear` straight to `aten::mm` → rocBLAS, bypassing
+    the dispatch.
+
+    Note: round-4 lever K (hoisting the n>4 check up here so inductor could
+    inline F.linear at high concurrency) was attempted on 2026-04-26 and
+    REGRESSED c=1 by 17% — the Python-level shape conditional broke the
+    inductor trace and forced eager Python execution on every GEMM call
+    (~10 µs × ~129 calls/token ≈ ~1.3 ms/token overhead). Reverted. The
+    c=64 (-4%) / c=128 (-9.3%) regression vs round-2 stands; recovery would
+    require per-layer closure binding (decide dispatch fn at layer init based
+    on weight.shape, no runtime conditional), which is invasive and doesn't
+    help the c=1 throughput target. See docs/mi100_decode_opt/round4_candidates.md
+    lever K for the full post-mortem.
+    """
+    return torch.ops.vllm.rocm_unquantized_gemm_gfx908(x, weight, bias)
+
+
+def _gfx908_weight_can_use_custom_gemm(weight: torch.Tensor) -> bool:
+    if weight.is_meta or weight.dim() != 2:
+        return True
+
+    m = weight.shape[0]
+    k = weight.shape[1]
+    dtype = weight.dtype
+
+    if dtype not in (torch.float16, torch.bfloat16):
+        return False
+    if k % 8 != 0 or not weight.is_contiguous():
+        return False
+
+    # LLMM1 can fire for n==1 with no bias. wvSplitK can fire for n<=4.
+    # Keep these potentially-fast shapes on the opaque custom op so compiled
+    # decode forwards still reach the runtime skinny-kernel dispatch.
+    if (m % 4 == 0 and k <= 8192) or m > 8:
+        return True
+
+    # AITER eligibility still depends on runtime n for the large-GEMM cutoff,
+    # but if n==1 can use it then this layer is a possible fast path.
+    return use_aiter_triton_gemm(1, m, k, dtype)
+
+
+def bind_rocm_unquantized_gemm_gfx908(layer: torch.nn.Module) -> None:
+    """Pre-bind the gfx908 unquantized GEMM route for a loaded layer.
+
+    The dynamic n>4 wrapper hoist regressed because it put shape conditionals
+    in the traced forward path. This binding keeps the decision static: layers
+    with no possible LLMM1/wvSplitK/AITER route use direct F.linear, while
+    possible fast-kernel layers keep the existing opaque custom op.
+    """
+    if _gfx908_weight_can_use_custom_gemm(layer.weight):
+        layer._vllm_unquantized_gemm = rocm_unquantized_gemm_gfx908
+    else:
+        layer._vllm_unquantized_gemm = default_unquantized_gemm
+
+
+direct_register_custom_op(
+    op_name="rocm_unquantized_gemm_gfx908",
+    op_func=rocm_unquantized_gemm_gfx908_impl,
+    fake_impl=rocm_unquantized_gemm_fake,
+)
+
+
 def dispatch_unquantized_gemm(
     linear_backend: str = "auto",
 ) -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx908
+
+        if on_gfx908():
+            return rocm_unquantized_gemm_gfx908
         return rocm_unquantized_gemm
     elif current_platform.is_cpu():
         return cpu_unquantized_gemm

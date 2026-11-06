@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from abc import abstractmethod
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -29,6 +30,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.utils import (
+    bind_rocm_unquantized_gemm_gfx908,
     cuda_unquantized_gemm,
     dispatch_unquantized_gemm,
     maybe_pad_weight_avoid_cache_aliasing,
@@ -229,6 +231,10 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 layer.weight.data = weight.t().contiguous().t()
         elif current_platform.is_rocm():
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
+            from vllm.platforms.rocm import on_gfx908
+
+            if on_gfx908() and os.environ.get("VLLM_GFX908_PREBIND_GEMM", "0") == "1":
+                bind_rocm_unquantized_gemm_gfx908(layer)
         elif self._gemm_impl is cuda_unquantized_gemm:
             maybe_use_skinny_gemm(layer)
 
@@ -242,6 +248,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
             current_platform.is_cuda_alike() or current_platform.is_xpu()
         ):
             return linear_batch_invariant(x, layer.weight, bias)
+        if (op := getattr(layer, "_vllm_unquantized_gemm", None)) is not None:
+            return op(layer, x, layer.weight, bias)
         return self._gemm_impl(layer, x, layer.weight, bias)
 
 

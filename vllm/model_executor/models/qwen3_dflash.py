@@ -112,6 +112,17 @@ def _reads_raw_weights(projs: list[nn.Module]) -> bool:
     )
 
 
+def _draft_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    """The drafter's own dtype. vllm_config.model_config is the TARGET config
+    even inside the draft model's constructor; a DFlash drafter may run bf16
+    under an fp16 target (see SpeculativeConfig draft dtype note), so derive
+    the parameter dtype from the draft model config explicitly."""
+    spec = vllm_config.speculative_config
+    if spec is not None and spec.draft_model_config is not None:
+        return spec.draft_model_config.dtype
+    return vllm_config.model_config.dtype
+
+
 def _get_dflash_fc_input_size(vllm_config: VllmConfig) -> int:
     spec_config = vllm_config.speculative_config
     assert spec_config is not None
@@ -497,7 +508,7 @@ class DFlashQwen3Model(nn.Module):
             "mask_token_id", getattr(self.config, "mask_token_id", None)
         )
         self.mask_embedding = nn.Parameter(
-            torch.zeros(self.config.hidden_size, dtype=vllm_config.model_config.dtype),
+            torch.zeros(self.config.hidden_size, dtype=_draft_dtype(vllm_config)),
             requires_grad=False,
         )
         self.has_separate_mask_embedding = False
@@ -522,7 +533,7 @@ class DFlashQwen3Model(nn.Module):
                 ),
                 output_size=self.config.hidden_size,
                 bias=False,
-                params_dtype=vllm_config.model_config.dtype,
+                params_dtype=_draft_dtype(vllm_config),
                 quant_config=self.quant_config,
                 prefix=maybe_prefix(prefix, "fc"),
                 return_bias=False,
@@ -821,7 +832,9 @@ class DFlashQwen3Model(nn.Module):
         if input_embeds is None:
             input_embeds = self.embed_input_ids(input_ids)
 
-        hidden_states = input_embeds
+        # Embeddings may arrive in the target's dtype (fp16 target + bf16
+        # draft is a supported mix); run the drafter stack in its own dtype.
+        hidden_states = input_embeds.to(self.norm.weight.dtype)
 
         residual = None
         for layer in self.layers:

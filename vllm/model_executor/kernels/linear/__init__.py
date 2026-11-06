@@ -26,6 +26,9 @@ from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.aiter_w8a16 import (
+    AiterW8A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.conch import (
     ConchLinearKernel,
 )
@@ -58,6 +61,9 @@ from vllm.model_executor.kernels.linear.mixed_precision.rdna_hybrid_w4a16 import
 )
 from vllm.model_executor.kernels.linear.mixed_precision.triton_w4a16 import (
     TritonW4A16LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.triton_w8a16 import (
+    TritonW8A16LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
@@ -551,6 +557,8 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         RDNA3W4A16LinearKernel,
         RDNAHybridW4A16LinearKernel,
         TritonW4A16LinearKernel,
+        AiterW8A16LinearKernel,
+        TritonW8A16LinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
     ],
@@ -917,6 +925,16 @@ def choose_mp_linear_kernel(
             compute_capability = _cc[0] * 10 + _cc[1]
 
     platform_kernels = _POSSIBLE_KERNELS.get(current_platform._enum, [])
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx908
+
+        if on_gfx908():
+            # Prefer tuned FP16 decode while keeping BF16 Triton fallbacks.
+            platform_kernels = [ExllamaLinearKernel] + [
+                kernel
+                for kernel in platform_kernels
+                if kernel is not ExllamaLinearKernel
+            ]
 
     # Apply --linear-backend filtering when set.
     platform_kernels = _resolve_backend_kernels(
@@ -1407,6 +1425,8 @@ __all__ = [
     "MacheteLinearKernel",
     "MarlinLinearKernel",
     "TritonW4A16LinearKernel",
+    "TritonW8A16LinearKernel",
+    "AiterW8A16LinearKernel",
     "XPUW4A8IntLinearKernel",
     "XPUwNa16LinearKernel",
     "init_mxfp8_linear_kernel",

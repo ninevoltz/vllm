@@ -15,6 +15,15 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.flashinfer import has_flashinfer
 
+
+def _on_gfx908() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx908
+
+    return on_gfx908()
+
+
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
         _topk_topp,
@@ -274,6 +283,7 @@ class TopKTopPSampler(nn.Module):
         elif (
             logprobs_mode not in PROCESSED_LOGPROBS_MODES
             and rocm_aiter_ops.is_enabled()
+            and not _on_gfx908()
         ):
             # Lazy ROCm-only import; keeps arch detection out of import time
             # on CUDA/CPU.

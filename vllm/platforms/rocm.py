@@ -222,6 +222,7 @@ _ON_GFX115X = "gfx115" in _GCN_ARCH
 _ON_GFX1201 = "gfx1201" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
+_ON_GFX908 = "gfx908" in _GCN_ARCH
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX90A = "gfx90a" in _GCN_ARCH
 _ON_GFX942 = "gfx942" in _GCN_ARCH
@@ -232,6 +233,64 @@ _ON_CDNA = any(arch in _GCN_ARCH for arch in ["gfx9", "gfx1250"])
 # RDNA = gfx11/gfx12 minus the CDNA-classified gfx1250.
 _ON_RDNA = _ON_GFX1X and not _ON_CDNA
 _ON_RDNA4 = any(arch in _GCN_ARCH for arch in ["gfx1200", "gfx1201"])
+
+# ---------------------------------------------------------------------------
+# gfx908 (MI100) auto-configuration
+# CK kernels crash on gfx908 (v_pk_mul_f32 is gfx90a+). Set safe defaults
+# so users only need VLLM_ROCM_USE_AITER=1 to get optimal gfx908 config.
+# Explicit user env vars always take priority (only set if not already set).
+# ---------------------------------------------------------------------------
+if _ON_GFX908:
+    _GFX908_DEFAULTS = {
+        # Disable CK-based ops (crash on gfx908)
+        "VLLM_ROCM_USE_AITER_LINEAR": "0",
+        "VLLM_ROCM_USE_AITER_MOE": "0",
+        "VLLM_ROCM_USE_AITER_MHA": "0",
+        "VLLM_ROCM_USE_AITER_MLA": "0",
+        "VLLM_ROCM_USE_AITER_RMSNORM": "0",
+        # AITER custom allreduce (2026-08 rewrite: fp8 quant + fused AR+RMSNorm)
+        # compiles on gfx908 with the opus.hpp guards but computes garbage —
+        # A/B on Qwen3.8-27B TP4: CAR on = degenerate '!!!' output, CAR off =
+        # coherent. Default off until the CDNA1 numerics are debugged.
+        "VLLM_ROCM_USE_AITER_CUSTOM_AR": "1",
+        # Disable FP8/FP4 (no hardware support)
+        "VLLM_ROCM_USE_AITER_FP8BMM": "0",
+        "VLLM_ROCM_USE_AITER_FP4BMM": "0",
+        "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": "0",
+        # Triton GEMM: enabled, but utils.use_aiter_triton_gemm() shape whitelist
+        # restricts dispatch to specific (m,k) pairs that microbench wins over rocBLAS.
+        # Broad-application historically -25% (dtype cast); shape-gated is safe.
+        "VLLM_ROCM_USE_AITER_TRITON_GEMM": "1",
+        # Skinny GEMM (wvSplitK): flipped to "1" 2026-04-24 after verifying
+        # the gfx908 compile guard at csrc/rocm/skinny_gemms.cu:25 already
+        # includes __gfx908__ in the host repo. Larkinwc/vllm-gfx908#4 reports
+        # +28% throughput / -27% TPOT for c=1 decode on Qwen3.5-9B with this
+        # enabled. Test before shipping (revert to "0" if it crashes).
+        "VLLM_ROCM_USE_SKINNY_GEMM": "1",
+        # Disable unified attention — UA kernel corrupts model state after
+        # extended use on gfx908, causing degenerate repetition (e.g. "!!!!!").
+        # Reproduces after ~200+ requests through UA decode path.
+        # Triton Attention is perf-equivalent at c=1 and stable long-term.
+        "VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION": "0",
+        "VLLM_ROCM_USE_AITER_TRITON_ROPE": "1",
+        # NCCL/RCCL tuning for 4×MI100 XGMI fabric (Stage 5j 2026-04-25):
+        # CAR is broken on gfx908 cudagraphs (CDNA1 IPC pointer staleness on
+        # graph replay), so all-reduces fall back to RCCL. Tree algo + LL
+        # protocol shave ~0.5 ms / step (~4.6% TPOT) vs the Ring/default-proto
+        # combination by reducing per-message latency for the small (~few KB)
+        # per-step all-reduces decode produces.
+        "NCCL_ALGO": "Tree",
+        "NCCL_PROTO": "LL",
+        # ROCm 7.2.4 hipBLASLt grew gfx908 addmm coverage with untuned
+        # heuristics: MTP verify GEMMs pick slow kernels (+15% TPOT on
+        # long-prompt spec decode). rocBLAS fallback restores the pre-7.2.4
+        # behavior, which was tuned on this fabric. A/B 2026-08-15:
+        # LT 15.2-17ms vs rocBLAS 14.7ms TPOT (old base 14.3).
+        "DISABLE_ADDMM_HIP_LT": "1",
+    }
+    for _var, _val in _GFX908_DEFAULTS.items():
+        if _var not in os.environ:
+            os.environ[_var] = _val
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
@@ -343,6 +402,10 @@ def on_rdna4() -> bool:
 
 def on_mi3xx() -> bool:
     return _ON_MI3XX
+
+
+def on_gfx908() -> bool:
+    return _ON_GFX908
 
 
 def on_gfx9() -> bool:
@@ -457,6 +520,12 @@ if (
 # https://github.com/ROCm/rocm-systems/issues/13572
 if torch.version.hip:
     os.environ.setdefault("NCCL_RAS_ENABLE", "0")
+
+
+@cache
+def on_mi100() -> bool:
+    """Detect MI100 (gfx908) which lacks native FP8 hardware."""
+    return _ON_GFX908
 
 
 @cache
@@ -862,6 +931,28 @@ class RocmPlatform(Platform):
                 str(sel_invalid_reasons),
             )
 
+        # gfx908/gfx9 env-var-based auto-selection runs before the priority
+        # fallback so that VLLM_ROCM_USE_AITER_* flags take effect.
+        if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
+            logger.info("Using Aiter Unified Attention backend.")
+            return AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path()
+
+        if (
+            envs.VLLM_ROCM_USE_AITER
+            and envs.VLLM_ROCM_USE_AITER_MHA
+            and (on_gfx9() or on_gfx908())
+        ):
+            logger.info("Using Aiter Flash Attention backend.")
+            return AttentionBackendEnum.ROCM_AITER_FA.get_path()
+
+        if (
+            envs.VLLM_ROCM_USE_AITER
+            and (on_gfx9() or on_gfx908())
+            and envs.VLLM_ROCM_USE_AITER_MHA is not False
+        ):
+            logger.info("Using Aiter Flash Attention backend.")
+            return AttentionBackendEnum.ROCM_AITER_FA.get_path()
+
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
         valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
@@ -964,6 +1055,7 @@ class RocmPlatform(Platform):
         if (
             rocm_aiter_ops.is_mha_enabled()
             and on_cdna()
+            and not on_gfx908()
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
             logger.info_once("Using AITER Flash Attention backend for ViT model.")
@@ -1197,6 +1289,164 @@ class RocmPlatform(Platform):
         compilation_config = vllm_config.compilation_config
         parallel_config = vllm_config.parallel_config
 
+        # MI100 (gfx908): block_size=32 reduces TTFT and improves prefix
+        # cache efficiency vs the default block_size=16. Only applied when
+        # the user hasn't explicitly set --block-size.
+        if _ON_GFX908:
+            cache_config = vllm_config.cache_config
+            if not cache_config.user_specified_block_size:
+                cache_config.block_size = 32
+
+        # MI100 (gfx908): force FULL_DECODE_ONLY graphs (PIECEWISE hangs at
+        # TP>1), and disable torch.compile / Inductor (fusions unavailable
+        # on ROCm, produces garbage or slowdown). Both gated by
+        # VLLM_MI100_TORCH_COMPILE=1 as an escape hatch.
+        if _ON_GFX908:
+            from vllm.config.compilation import CompilationMode
+
+            mi100_override_compile = (
+                os.environ.get("VLLM_MI100_TORCH_COMPILE", "0") != "1"
+            )
+            if mi100_override_compile:
+                if compilation_config.cudagraph_mode in (
+                    CUDAGraphMode.PIECEWISE,
+                    CUDAGraphMode.FULL_AND_PIECEWISE,
+                ):
+                    logger.info_once(
+                        "gfx908 (MI100): forcing FULL_DECODE_ONLY CUDA "
+                        "graphs (PIECEWISE hangs at TP>1)."
+                    )
+                    compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+                if compilation_config.mode != CompilationMode.NONE:
+                    logger.info_once(
+                        "gfx908 (MI100): disabling torch.compile "
+                        "(Inductor fusions not available on ROCm). "
+                        "Set VLLM_MI100_TORCH_COMPILE=1 to override."
+                    )
+                    compilation_config.mode = CompilationMode.NONE
+
+            # gfx908 + compile: default the AITER AR+RMSNorm fusion pass ON.
+            # Validated 2026-08-28 (full 12-tier + GSM8K on the 27B W4 arm):
+            # decode-stress +4%, c=8-64 +2-4%, accuracy unchanged. Opt out
+            # with VLLM_GFX908_FUSE_AR_RMS=0.
+            # Quantized-lm_head checkpoints (GPTQ lm_head=true) can't run
+            # the fp32-head logits path; default head_dtype to the model
+            # dtype so they boot without --hf-overrides. An explicit
+            # head_dtype in the HF config or overrides still wins.
+            try:
+                qcfg = getattr(vllm_config.model_config, "hf_config", None)
+                qq = getattr(qcfg, "quantization_config", None) or {}
+                if (
+                    qcfg is not None
+                    and isinstance(qq, dict)
+                    and qq.get("lm_head")
+                    and getattr(qcfg, "head_dtype", None) is None
+                ):
+                    qcfg.head_dtype = "model"
+                    logger.info_once(
+                        "gfx908 (MI100): quantized lm_head detected — "
+                        "defaulting head_dtype to the model dtype."
+                    )
+            except Exception:
+                pass
+
+            # gfx908: the DFlash drafter's auto-selected attention backend
+            # scans the full context per draft step (its sliding window is
+            # not honored on that path) — 4.1x slower at 16K ctx (51.2 vs
+            # 12.5 ms/tok measured c=1). Default the draft backend to
+            # TRITON_ATTN, where unified attention (with the 3D split-KV
+            # verify path) handles it context-flat.
+            spec_cfg = vllm_config.speculative_config
+            if (
+                spec_cfg is not None
+                and getattr(spec_cfg, "method", None) == "dflash"
+                and getattr(spec_cfg, "attention_backend", None) is None
+            ):
+                try:
+                    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+                    spec_cfg.attention_backend = AttentionBackendEnum.TRITON_ATTN
+                    logger.info_once(
+                        "gfx908 (MI100): defaulting DFlash draft attention "
+                        "backend to TRITON_ATTN."
+                    )
+                except Exception:
+                    pass
+
+            # NOTE: mutually exclusive with AITER custom allreduce — the
+            # fused AR+RMS op combined with CAR produces corrupted output on
+            # gfx908 (repetition garbage, observed 2026-08-28). Batch/CAR
+            # deployments keep plain AR + CAR; fusion covers the CAR-off
+            # (interactive) configs where it was validated.
+            if (
+                not mi100_override_compile
+                and compilation_config.mode != CompilationMode.NONE
+                and not compilation_config.pass_config.fuse_allreduce_rms
+                and os.environ.get("VLLM_GFX908_FUSE_AR_RMS", "1") == "1"
+                and os.environ.get("VLLM_ROCM_USE_AITER_CUSTOM_AR", "0") != "1"
+            ):
+                logger.info_once(
+                    "gfx908 (MI100): enabling AITER allreduce+rmsnorm fusion "
+                    "(VLLM_GFX908_FUSE_AR_RMS=0 to disable)."
+                )
+                compilation_config.pass_config.fuse_allreduce_rms = True
+
+        # MI100 (gfx908): MTP speculative decode needs two adjustments to run
+        # under CUDA graphs:
+        #   1. TORCH_NCCL_BLOCKING_WAIT=1 — PyTorch's NCCL watchdog queries HIP
+        #      events recorded in a capturing stream and can abort capture with
+        #      hipErrorCapturedEvent. Blocking-wait avoids the async query.
+        #   2. At num_speculative_tokens>=3 the deeper draft batch + a 27B-class
+        #      prefill overflow the cudagraph-captured token buffer at the
+        #      default budget and fault with an illegal memory access mid-serve.
+        #      Raising max_num_batched_tokens to >=8192 sizes the buffer for the
+        #      draft slots. n=1/2 are unaffected and left untouched. This runs
+        #      before the spec-decode budget derivation in VllmConfig, so the
+        #      bumped value propagates into max_num_scheduled_tokens.
+        if _ON_GFX908:
+            speculative_config = vllm_config.speculative_config
+            if (
+                speculative_config is not None
+                and getattr(speculative_config, "method", None) == "mtp"
+            ):
+                # torch >= 2.11 no longer queries HIP events from the
+                # ProcessGroupNCCL watchdog during capture; the blocking-wait
+                # workaround costs ~1 ms/step under MTP, so only apply it on
+                # older torch (verified 2026-08-15: capture succeeds on 2.11
+                # without it).
+                import torch as _torch
+
+                _needs_blocking_wait = tuple(
+                    int(x) for x in _torch.__version__.split(".")[:2]
+                ) < (2, 11)
+                blocking_wait = os.environ.get("TORCH_NCCL_BLOCKING_WAIT")
+                if blocking_wait is None and _needs_blocking_wait:
+                    os.environ["TORCH_NCCL_BLOCKING_WAIT"] = "1"
+                    logger.info_once(
+                        "gfx908 (MI100): setting TORCH_NCCL_BLOCKING_WAIT=1 for "
+                        "MTP CUDA graph capture (avoids ProcessGroupNCCL "
+                        "watchdog HIP-event queries during capture)."
+                    )
+                elif _needs_blocking_wait and blocking_wait != "1":
+                    logger.warning_once(
+                        "gfx908 (MI100): MTP CUDA graph capture may fail "
+                        "because TORCH_NCCL_BLOCKING_WAIT=%r. Set it to 1.",
+                        blocking_wait,
+                    )
+
+                n_spec = getattr(speculative_config, "num_speculative_tokens", 0) or 0
+                scheduler_config = vllm_config.scheduler_config
+                if n_spec >= 3 and scheduler_config.max_num_batched_tokens < 8192:
+                    logger.info_once(
+                        "gfx908 (MI100): raising max_num_batched_tokens "
+                        "%d -> 8192 for MTP num_speculative_tokens=%d (deeper "
+                        "draft batch overflows the cudagraph-captured token "
+                        "buffer at the default budget and faults).",
+                        scheduler_config.max_num_batched_tokens,
+                        n_spec,
+                    )
+                    scheduler_config.max_num_batched_tokens = 8192
+
         if (
             compilation_config.cudagraph_mode.has_full_cudagraphs()
             and parallel_config.prefill_context_parallel_size > 1
@@ -1306,8 +1556,10 @@ class RocmPlatform(Platform):
 
     @classmethod
     def use_custom_allreduce(cls) -> bool:
-        # We only enable custom allreduce for MI300 series
-        return any(gfx in _GCN_ARCH for gfx in ["gfx94", "gfx95"])
+        # CDNA accelerators: quickreduce supports gfx908, gfx90a,
+        # gfx942/gfx950. gfx908 additionally bypasses CAR during CUDA-graph
+        # capture (see custom_all_reduce.py) to avoid HIP-graph-replay NaN.
+        return _ON_GFX9 or _ON_GFX908
 
     @classmethod
     def opaque_attention_op(cls) -> bool:

@@ -6,7 +6,6 @@ import torch.nn.functional as F
 from torch import nn
 
 from vllm.compilation.backends import set_model_tag
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -459,7 +458,10 @@ def _score_edges_reference(
     )
 
 
-@support_torch_compile
+# NOT @support_torch_compile: the edge-scoring einsum/gather miscompiles under
+# inductor on gfx908 — drafts silently diverge and acceptance collapses to 0%
+# while output stays coherent (verify rejects everything). DFlash-v1 without
+# this module compiles fine; run the selector eagerly.
 class CandidateSelector(nn.Module):
     def __init__(
         self,
@@ -533,7 +535,11 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
                 vocab_size=self.config.vocab_size,
                 rank=int(draft_config["selector_rank"]),
                 top_k=int(draft_config["selector_top_k"]),
-                params_dtype=vllm_config.model_config.dtype,
+                params_dtype=(
+                    vllm_config.speculative_config.draft_model_config.dtype
+                    if vllm_config.speculative_config is not None
+                    else vllm_config.model_config.dtype
+                ),
                 prefix=maybe_prefix(prefix, "candidate_selector"),
             )
 
@@ -562,6 +568,14 @@ class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
     def compute_candidates(
         self, hidden_states: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        # The drafter ties the TARGET's lm_head. When that head is quantized
+        # (e.g. an 8-bit GPTQ lm_head), its kernels take the target dtype and
+        # the LogitsProcessor rejects a head_dtype mismatch — so cast the
+        # drafter's (possibly bf16) hidden states to the head's input dtype
+        # at the boundary. Bounded post-norm values; lossless in practice.
+        head_dtype = getattr(self.candidate_logits_processor, "head_dtype", None)
+        if head_dtype is not None and hidden_states.dtype != head_dtype:
+            hidden_states = hidden_states.to(head_dtype)
         return self.candidate_logits_processor.get_top_k_tokens(
             self.lm_head, hidden_states, self.model.candidate_selector.top_k
         )

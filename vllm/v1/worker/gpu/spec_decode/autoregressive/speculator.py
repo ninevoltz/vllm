@@ -110,6 +110,18 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
     def on_multi_step_decode_end(self, num_reqs: int) -> None: ...
 
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        super().load_model(target_model)
+        if not self.supports_mm_inputs:
+            return
+
+        self.inputs_embeds = torch.zeros(
+            self.max_num_tokens,
+            self.hidden_size,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
     @property
     def advance_draft_positions(self) -> bool:
         """Whether each draft step writes a new KV position."""

@@ -1243,6 +1243,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             suffix_lse=lse,
         )
 
+    @torch.compiler.disable
     def forward(
         self,
         layer: torch.nn.Module,
@@ -1416,6 +1417,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # (pa_fwd_asm and paged_attention_v1 don't support sinks).
             # Single-token SWA decode on the trimmed block table is ~2x
             # faster on the paged kernel than unified_attention.
+            from vllm.platforms.rocm import on_gfx908
+
             decode_md = attn_metadata.decode_metadata
             use_swa_paged = (
                 self.sliding_window[0] != -1
@@ -1430,6 +1433,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 (self.sliding_window[0] != -1 and not use_swa_paged)
                 or decode_max_query_len > 1
                 or self.sinks is not None
+                or on_gfx908()
             ):
                 k_descale, v_descale = self._get_kv_cache_descales(layer, num_decodes)
                 assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (

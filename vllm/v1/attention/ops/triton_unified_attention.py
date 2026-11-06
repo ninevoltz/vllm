@@ -932,6 +932,17 @@ def _get_tile_size(
         # Gemma3: use 32 for decode (default is 16)
         return 32
 
+    # MI100 (gfx908): larger decode tile amortizes per-tile overhead given
+    # the 1.2 TB/s bandwidth (vs 5.3 TB/s on MI300X).
+    if not is_prefill:
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_mi100
+
+            if on_mi100():
+                return 32
+
     # Default behavior
     if is_prefill:
         return 32
@@ -961,6 +972,7 @@ def unified_attention(
     softmax_segm_output=None,
     softmax_segm_max=None,
     softmax_segm_expsum=None,
+    max_flash_decoding_splits=None,
     alibi_slopes=None,
     output_scale=None,
     qq_bias=None,
@@ -1117,6 +1129,32 @@ def unified_attention(
         ):
             BLOCK_M, rdna_prefill_tile, launch_num_warps, launch_num_stages = config
             BLOCK_Q = BLOCK_M // num_queries_per_kv
+    # gfx908 (MI100) prefill-shaped launches with small num_queries_per_kv
+    # (e.g. GQA 40/8 -> BLOCK_Q=3) under-tile the same way the large-head
+    # B200 case above does: few query rows per program, narrow KV tile.
+    # Opt-in experiment gate; decode-only launches (max_seqlen_q == 1,
+    # captured in FULL cudagraphs) are unaffected.
+    # Modes: "block32" = BLOCK_M 32 + 8 warps (measured -15% on granite-4B
+    # GQA40/8 head64 -- occupancy loss); "tile64" = widen the prefill KV
+    # tile only. Default off.
+    tuned_gfx908_prefill_mode = ""
+    if not tuned_large_head and max_seqlen_q > 1 and num_queries_per_kv <= 16:
+        import os as _os
+
+        try:
+            from vllm.platforms.rocm import on_gfx908 as _on_gfx908_fn
+
+            if _on_gfx908_fn():
+                tuned_gfx908_prefill_mode = _os.environ.get(
+                    "VLLM_GFX908_ATTN_PREFILL_TUNE", ""
+                ).strip()
+        except Exception:
+            tuned_gfx908_prefill_mode = ""
+    if tuned_gfx908_prefill_mode in ("1", "block32"):
+        BLOCK_M = 32
+        BLOCK_Q = BLOCK_M // num_queries_per_kv
+        launch_num_warps = 8
+        launch_num_stages = 2
 
     # Ideally we would launch with kernel with:
     # \sum_i[ceil(query_len[i] / BLOCK_Q)] blocks.
@@ -1152,6 +1190,8 @@ def unified_attention(
         TILE_SIZE_PREFILL = 128
     elif rdna_prefill_tile is not None:
         TILE_SIZE_PREFILL = rdna_prefill_tile
+    elif tuned_gfx908_prefill_mode == "tile64":
+        TILE_SIZE_PREFILL = 64
 
     # USE_TD requires BLOCK_SIZE % TILE_SIZE == 0 (enforced by a
     # ``tl.static_assert`` in the kernel).  The default prefill tile
@@ -1376,14 +1416,32 @@ def unified_attention(
     segm_output_ptr = softmax_segm_output if use_3d else None
     segm_max_ptr = softmax_segm_max if use_3d else None
     segm_expsum_ptr = softmax_segm_expsum if use_3d else None
-    num_segments = num_par_softmax_segments if use_3d else 1
+
+    # MI100 Adaptive Flash-Decoding split-K: when the caller supplies
+    # max_flash_decoding_splits (gfx908 only today), pick a split count
+    # at runtime that fills target CUs instead of using a fixed value.
+    # The buffer caps us via softmax_segm_output.shape[2].
+    if use_3d and max_flash_decoding_splits is not None and max_seqlen_k > 0:
+        from vllm.v1.attention.backends.triton_attn import (
+            _compute_flash_decoding_splits,
+        )
+
+        actual_num_splits = _compute_flash_decoding_splits(
+            max_seq_len=max_seqlen_k,
+            num_seqs=num_seqs,
+            num_kv_heads=num_kv_heads,
+            tile_size=TILE_SIZE_DECODE,
+        )
+        actual_num_splits = min(actual_num_splits, softmax_segm_output.shape[2])
+    else:
+        actual_num_splits = num_par_softmax_segments if use_3d else 1
 
     grid: tuple[Any, ...]
     if not use_3d:
         grid = (total_num_q_blocks, num_kv_heads)
         tile_size = TILE_SIZE_PREFILL
     else:
-        grid = (total_num_q_blocks, num_kv_heads, num_par_softmax_segments)
+        grid = (total_num_q_blocks, num_kv_heads, actual_num_splits)
         tile_size = TILE_SIZE_DECODE
 
     launch_kwargs: dict[str, int] = {}
@@ -1458,7 +1516,7 @@ def unified_attention(
         BLOCK_Q=BLOCK_Q,
         num_seqs=num_seqs,
         BLOCK_M=BLOCK_M,
-        NUM_SEGMENTS_PER_SEQ=num_segments,
+        NUM_SEGMENTS_PER_SEQ=actual_num_splits,
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
@@ -1489,6 +1547,6 @@ def unified_attention(
             HEAD_SIZE_PADDED=head_size_padded,
             query_start_len_ptr=cu_seqlens_q,
             BLOCK_Q=BLOCK_Q,
-            NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
+            NUM_SEGMENTS_PER_SEQ=actual_num_splits,
             USE_FP8=output_scale is not None,
         )
