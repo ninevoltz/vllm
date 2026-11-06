@@ -16,6 +16,9 @@ export ROCM_PATH=/opt/rocm HIP_PATH=/opt/rocm PYTORCH_ROCM_ARCH=gfx908
 export MAX_JOBS=4 OMP_NUM_THREADS=1
 export VLLM_GFX908_HIP_BUILD_DIR="${env_root}/extensions"
 export TORCH_EXTENSIONS_DIR="${env_root}/extensions"
+export TRITON_CACHE_DIR="${env_root}/triton-cache"
+export TORCHINDUCTOR_CACHE_DIR="${env_root}/inductor-cache"
+export VLLM_CACHE_ROOT="${env_root}/cache"
 export VLLM_GFX908_MTP_QUANT=w4
 export VLLM_GFX908_W8A16=1
 export VLLM_GFX908_W4A8=1

@@ -404,7 +404,9 @@ comparison without speculation. Draft quantization changes the proposal model;
 the target still verifies its proposals with vLLM's rejection sampler.
 
 The launcher stores HIP extension binaries in
-`$MI100_ENV_ROOT/extensions` and uses the virtual environment under that root.
+`$MI100_ENV_ROOT/extensions`, Triton binaries in `$MI100_ENV_ROOT/triton-cache`,
+and other build caches under the same environment root. It uses the virtual
+environment under that root.
 Its 4 GiB static KV budget was measured with this checkpoint at TP4 and one
 sequence; other checkpoints require their own memory measurement. This avoids
 the extensible cache's conservative ROCm warmup reserve. It does not pin the

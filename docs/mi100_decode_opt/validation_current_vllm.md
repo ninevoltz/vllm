@@ -2,6 +2,10 @@
 
 Validated 2026-11-06 on four 32 GiB AMD Instinct MI100 GPUs.
 
+For the current optimized serving configuration, see the
+[MTP follow-up](validation_mtp_current_vllm.md). This page records the initial
+eager correctness baseline.
+
 ## Source and environment
 
 - Upstream starting commit: `3cd3a7ad1c`.

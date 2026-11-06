@@ -1,0 +1,320 @@
+{
+  "date": "2026-11-06",
+  "code_commit": "12e32756f9",
+  "source_optimization_commit": "bc5abbc72292747bec6a1efb858db1e2cfbf0211",
+  "wheel_version": "0.33.0rc1.dev1072+g12e32756f.rocm714",
+  "wheel_sha256": "2405a1e89e24f13ca130cd6747421c33f607f9dc374b06dc80107eaecffc9e63",
+  "checkpoint_snapshot": "9ae8d0e1989ad3a4eaeea501d5f6c75f4eeda7e1",
+  "hardware": "4 x MI100 32 GiB",
+  "max_model_len": 262144,
+  "max_num_seqs": 1,
+  "max_num_batched_tokens": 8192,
+  "static_kv_bytes_per_gpu": 4294967296,
+  "kv_token_capacity": 283146,
+  "mtp": {
+    "method": "mtp",
+    "draft_tokens": 3,
+    "draft_sample_method": "probabilistic",
+    "draft_quantization": "w4",
+    "accepted": 989.0,
+    "drafted": 1647.0,
+    "draft_steps": 549.0,
+    "acceptance_rate": 0.6004857316332726,
+    "mean_acceptance_length": 2.801457194899818
+  },
+  "reductions": {
+    "decode": "gfx908 push all-reduce through native CUSTOM backend",
+    "fallback": "RCCL/PYNCCL",
+    "aiter_custom_ar": false
+  },
+  "benchmark": {
+    "mtp": [
+      {
+        "subject": "bicycle mechanics",
+        "seconds": 9.258866729999681,
+        "ttft_seconds": 0.23856908099969587,
+        "decode_tokens_per_second": 56.65001531924513,
+        "usage": {
+          "prompt_tokens": 20,
+          "total_tokens": 532,
+          "completion_tokens": 512,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      {
+        "subject": "the water cycle",
+        "seconds": 8.104201475999616,
+        "ttft_seconds": 0.13129528100034804,
+        "decode_tokens_per_second": 64.09206222951767,
+        "usage": {
+          "prompt_tokens": 21,
+          "total_tokens": 533,
+          "completion_tokens": 512,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      {
+        "subject": "how a compiler translates source code",
+        "seconds": 7.707914986000105,
+        "ttft_seconds": 0.12923354899976403,
+        "decode_tokens_per_second": 67.42597696549375,
+        "usage": {
+          "prompt_tokens": 24,
+          "total_tokens": 536,
+          "completion_tokens": 512,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      }
+    ],
+    "without_mtp": [
+      {
+        "subject": "bicycle mechanics",
+        "seconds": 19.360429493000083,
+        "ttft_seconds": 0.4592620290004561,
+        "decode_tokens_per_second": 27.03536704668023,
+        "usage": {
+          "prompt_tokens": 20,
+          "total_tokens": 532,
+          "completion_tokens": 512,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      {
+        "subject": "the water cycle",
+        "seconds": 18.990100479999455,
+        "ttft_seconds": 0.08866021399990132,
+        "decode_tokens_per_second": 27.0349768487855,
+        "usage": {
+          "prompt_tokens": 21,
+          "total_tokens": 533,
+          "completion_tokens": 512,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      },
+      {
+        "subject": "how a compiler translates source code",
+        "seconds": 19.062206603999584,
+        "ttft_seconds": 0.08877972399932332,
+        "decode_tokens_per_second": 26.932404105588382,
+        "usage": {
+          "prompt_tokens": 24,
+          "total_tokens": 536,
+          "completion_tokens": 512,
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        }
+      }
+    ]
+  },
+  "serving_checks": [
+    {
+      "test": "text",
+      "answer": "4",
+      "usage": {
+        "prompt_tokens": 26,
+        "total_tokens": 28,
+        "completion_tokens": 2,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "seconds": 0.13625967200005107,
+      "passed": true
+    },
+    {
+      "test": "vision",
+      "answer": " red",
+      "usage": {
+        "prompt_tokens": 221,
+        "total_tokens": 223,
+        "completion_tokens": 2,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "seconds": 0.6652443269995274,
+      "passed": true
+    },
+    {
+      "test": "video",
+      "answer": " Blue",
+      "usage": {
+        "prompt_tokens": 252,
+        "total_tokens": 254,
+        "completion_tokens": 2,
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "seconds": 0.29869776900068246,
+      "passed": true
+    },
+    {
+      "test": "context",
+      "context_budget": 8192,
+      "answer": "Oslo\n\nThe inventory record explicitly states: \"warehouse W172 is located in Oslo.\" The subsequent background notes regarding shipment records (X000",
+      "usage": {
+        "prompt_tokens": 8160,
+        "total_tokens": 8192,
+        "completion_tokens": 32,
+        "completion_tokens_details": null
+      },
+      "seconds": 3.5720678130001033,
+      "passed": true
+    },
+    {
+      "test": "context",
+      "context_budget": 32768,
+      "answer": "Kyoto\n\nThe inventory record explicitly states: \"warehouse W172 is located in Kyoto.\" The subsequent background notes regarding shipment records (X000",
+      "usage": {
+        "prompt_tokens": 32736,
+        "total_tokens": 32768,
+        "completion_tokens": 32,
+        "completion_tokens_details": null
+      },
+      "seconds": 10.478450297000563,
+      "passed": true
+    },
+    {
+      "test": "context",
+      "context_budget": 131072,
+      "answer": "Lima\n\nThe inventory record explicitly states: \"warehouse W172 is located in Lima.\" The subsequent background notes regarding shipment records (X000",
+      "usage": {
+        "prompt_tokens": 131040,
+        "total_tokens": 131072,
+        "completion_tokens": 32,
+        "completion_tokens_details": null
+      },
+      "seconds": 53.162972466999236,
+      "passed": true
+    },
+    {
+      "test": "context",
+      "context_budget": 262144,
+      "answer": "Paris\n\nThe inventory record explicitly states: \"warehouse W172 is located in Paris.\" The subsequent background notes (Record X000000",
+      "usage": {
+        "prompt_tokens": 262112,
+        "total_tokens": 262144,
+        "completion_tokens": 32,
+        "completion_tokens_details": null
+      },
+      "seconds": 138.29626129999997,
+      "passed": true
+    }
+  ],
+  "arithmetic_smoke": [
+    {
+      "question": "A box has 18 red balls and 27 blue balls. How many balls in total?",
+      "expected": 45,
+      "answer": "45",
+      "passed": true,
+      "seconds": 16.248021903000335
+    },
+    {
+      "question": "Three boxes each contain 24 pencils. You give away 19 pencils. How many remain?",
+      "expected": 53,
+      "answer": "53",
+      "passed": true,
+      "seconds": 0.25139773599948967
+    },
+    {
+      "question": "A train travels 60 kilometers per hour for 2.5 hours. How many kilometers does it travel?",
+      "expected": 150,
+      "answer": "150",
+      "passed": true,
+      "seconds": 0.49699090600006457
+    },
+    {
+      "question": "An 80 dollar item is discounted by 20 percent. What is its new price in dollars?",
+      "expected": 64,
+      "answer": "64",
+      "passed": true,
+      "seconds": 0.24963144399953308
+    },
+    {
+      "question": "Start with 250 and subtract 35 twice. What is the result?",
+      "expected": 180,
+      "answer": "180",
+      "passed": true,
+      "seconds": 0.24597556800017628
+    },
+    {
+      "question": "What is the perimeter of a rectangle with sides 12 and 9?",
+      "expected": 42,
+      "answer": "42",
+      "passed": true,
+      "seconds": 0.24246637799933524
+    },
+    {
+      "question": "Five equally productive workers finish a job in 6 days. How many days would 3 workers need?",
+      "expected": 10,
+      "answer": "10",
+      "passed": true,
+      "seconds": 0.2501036070007103
+    },
+    {
+      "question": "A book has 120 pages. You have read 3/8 of it. How many pages remain?",
+      "expected": 75,
+      "answer": "75",
+      "passed": true,
+      "seconds": 0.2493906039999274
+    },
+    {
+      "question": "What is 7 times 8 minus 13?",
+      "expected": 43,
+      "answer": "43",
+      "passed": true,
+      "seconds": 0.1779569430000265
+    },
+    {
+      "question": "Solve 4*x + 7 = 39. What is x?",
+      "expected": 8,
+      "answer": "8",
+      "passed": true,
+      "seconds": 0.23676535899994633
+    },
+    {
+      "question": "What is (15 + 9) divided by 3?",
+      "expected": 8,
+      "answer": "8",
+      "passed": true,
+      "seconds": 0.21980885399989347
+    },
+    {
+      "question": "You buy 6 tickets at 17 dollars each and pay with 150 dollars. How many dollars change do you get?",
+      "expected": 48,
+      "answer": "48",
+      "passed": true,
+      "seconds": 0.2511632660007308
+    }
+  ],
+  "automatic_tool_choice": {
+    "passed": true,
+    "function": "lookup_inventory",
+    "arguments": {
+      "sku": "ABC123"
+    }
+  },
+  "focused_tests": {
+    "kernel_cases_passed": 39,
+    "mtp_config_cases_passed": 10,
+    "push_replays_per_dtype": 40,
+    "push_reductions_per_replay": 2,
+    "push_dtypes": [
+      "bfloat16",
+      "float16",
+      "float32"
+    ]
+  }
+}
