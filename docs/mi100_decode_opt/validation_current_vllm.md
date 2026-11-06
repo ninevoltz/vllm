@@ -89,6 +89,13 @@ requests at the configured maximum length; actual serving was limited to one
 concurrent request. These checks establish the tested behavior, not universal
 long-document accuracy or unrestricted media capacity.
 
+Automatic tool-choice validation also passed after restarting with the final
+wheel: the API returned a parsed `lookup_inventory` call with
+`{"sku":"ABC123"}` and `finish_reason="tool_calls"`. The server is running on
+`127.0.0.1:8001` with the Open WebUI parser flags enabled. The installed wheel
+is `0.33.0rc1.dev1069+g6599b14cb.rocm714`; its critical Python source hashes
+match the validated repository files.
+
 Raw acceptance results: [validation_qwen38_mi100.json](validation_qwen38_mi100.json).
 Full logs, including failed attempts and before/after kernel results, remain in
 `~/git-projects/vllm-mi100_support/`.
