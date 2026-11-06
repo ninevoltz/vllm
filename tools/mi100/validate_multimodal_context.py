@@ -11,7 +11,7 @@ import urllib.request
 import av
 import numpy as np
 import pybase64 as base64
-from PIL import Image
+from PIL import Image, ImageDraw
 from transformers import AutoTokenizer
 
 
@@ -36,7 +36,11 @@ def main():
     parser.add_argument(
         "--lengths", nargs="+", type=int, default=[8192, 32768, 131072, 262144]
     )
+    parser.add_argument("--context-only", action="store_true")
+    parser.add_argument("--continue-on-failure", action="store_true")
     args = parser.parse_args()
+
+    failures = []
 
     def chat(name, content, expected):
         started = time.monotonic()
@@ -60,51 +64,61 @@ def main():
             "passed": expected in answer.lower(),
         }
         print(json.dumps(record), flush=True)
-        assert record["passed"], record
+        if not record["passed"]:
+            failures.append(record)
+            if not args.continue_on_failure:
+                raise AssertionError(record)
 
-    chat("text", "What is 2 + 2? Reply with only the number.", "4")
-    png = io.BytesIO()
-    Image.new("RGB", (224, 224), "red").save(png, format="PNG")
-    chat(
-        "vision",
-        [
-            {
-                "type": "image_url",
-                "image_url": {"url": data_url(png.getvalue(), "image/png")},
-            },
-            {
-                "type": "text",
-                "text": "What color fills the image? Reply with one word.",
-            },
-        ],
-        "red",
-    )
-    video = io.BytesIO()
-    with av.open(video, "w", format="mp4") as container:
-        stream = container.add_stream("libx264", rate=2)
-        stream.width = stream.height = 224
-        stream.pix_fmt = "yuv420p"
-        for color in ("red", "red", "blue", "blue"):
-            pixels = np.asarray(Image.new("RGB", (224, 224), color))
-            frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
-            for packet in stream.encode(frame):
+    if not args.context_only:
+        chat("text", "What is 2 + 2? Reply with only the number.", "4")
+        png = io.BytesIO()
+        scene = Image.new("RGB", (448, 448), "white")
+        draw = ImageDraw.Draw(scene)
+        draw.rectangle((40, 40, 200, 200), fill="red")
+        draw.ellipse((240, 240, 410, 410), fill="blue")
+        scene.save(png, format="PNG")
+        chat(
+            "vision",
+            [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": data_url(png.getvalue(), "image/png")},
+                },
+                {
+                    "type": "text",
+                    "text": "Which color is the upper-left square? One word.",
+                },
+            ],
+            "red",
+        )
+        video = io.BytesIO()
+        with av.open(video, "w", format="mp4") as container:
+            stream = container.add_stream("libx264", rate=2)
+            stream.width = stream.height = 224
+            stream.pix_fmt = "yuv420p"
+            for color in ("red",) * 4 + ("blue",) * 4:
+                scene = Image.new("RGB", (224, 224), "white")
+                ImageDraw.Draw(scene).rectangle((40, 40, 180, 180), fill=color)
+                pixels = np.asarray(scene)
+                frame = av.VideoFrame.from_ndarray(pixels, format="rgb24")
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
                 container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
-    chat(
-        "video",
-        [
-            {
-                "type": "video_url",
-                "video_url": {"url": data_url(video.getvalue(), "video/mp4")},
-            },
-            {
-                "type": "text",
-                "text": "What color fills the final frames? Reply with one word.",
-            },
-        ],
-        "blue",
-    )
+        chat(
+            "video",
+            [
+                {
+                    "type": "video_url",
+                    "video_url": {"url": data_url(video.getvalue(), "video/mp4")},
+                },
+                {
+                    "type": "text",
+                    "text": "Which color is the last square? One word.",
+                },
+            ],
+            "blue",
+        )
 
     tokenizer = AutoTokenizer.from_pretrained(args.model, local_files_only=True)
     marker = "MI100_CONTEXT_FILLER"
@@ -112,9 +126,15 @@ def main():
         [
             {
                 "role": "user",
-                "content": "Remember the secret code 71391.\n"
+                "content": (
+                    "Inventory record: warehouse W172 is located in Oslo.\n"
+                    "Background notes:\n"
+                )
                 + marker
-                + "\nWhat is the secret code? Reply only with the code.",
+                + (
+                    "\nWhich city is warehouse W172 located in? "
+                    "Reply only with the city name."
+                ),
             }
         ],
         tokenize=False,
@@ -122,14 +142,26 @@ def main():
         enable_thinking=False,
     )
     before, after = full.split(marker)
-    prefix = tokenizer.encode(before, add_special_tokens=False)
     suffix = tokenizer.encode(after, add_special_tokens=False)
-    filler = tokenizer.encode(" tree", add_special_tokens=False)
-    assert len(filler) == 1, filler
-    for length in args.lengths:
+    cities = ("Riga", "Boston", "Delhi", "Accra", "Berlin", "Sofia")
+    notes = "\n".join(
+        f"Record X{i:06}: destination {cities[i % len(cities)]}; "
+        f"shipment count {i % 97 + 1}; packaging cardboard."
+        for i in range(30000)
+    )
+    filler = tokenizer.encode(
+        notes, add_special_tokens=False, truncation=True, max_length=max(args.lengths)
+    )
+    for index, length in enumerate(args.lengths):
+        city = ("Oslo", "Kyoto", "Lima", "Paris")[index % 4]
+        prefix = tokenizer.encode(
+            before.replace("Oslo", city), add_special_tokens=False
+        )
         # Reserve exactly 32 positions for generation, including EOS.
         prompt_len = length - 32
-        prompt = prefix + filler * (prompt_len - len(prefix) - len(suffix)) + suffix
+        count = prompt_len - len(prefix) - len(suffix)
+        assert 0 <= count <= len(filler)
+        prompt = prefix + filler[:count] + suffix
         assert len(prompt) == prompt_len
         started = time.monotonic()
         result = request(
@@ -140,6 +172,8 @@ def main():
                 "prompt": prompt,
                 "temperature": 0,
                 "max_tokens": 32,
+                "min_tokens": 32,
+                "ignore_eos": True,
             },
         )
         answer = result["choices"][0]["text"]
@@ -149,11 +183,18 @@ def main():
             "answer": answer,
             "usage": result["usage"],
             "seconds": time.monotonic() - started,
-            "passed": "71391" in answer,
+            "passed": city.lower() in answer.lower(),
         }
         print(json.dumps(record), flush=True)
         assert result["usage"]["prompt_tokens"] == prompt_len, record
-        assert record["passed"], record
+        assert result["usage"]["completion_tokens"] == 32, record
+        if not record["passed"]:
+            failures.append(record)
+            if not args.continue_on_failure:
+                raise AssertionError(record)
+
+    if failures:
+        raise SystemExit(f"{len(failures)} validation checks failed")
 
 
 if __name__ == "__main__":

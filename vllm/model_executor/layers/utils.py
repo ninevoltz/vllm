@@ -919,7 +919,8 @@ def rocm_unquantized_gemm_gfx908_impl(
     # Required conditions for both: weight.is_contiguous() (LLMM1/wvSplitK
     # assume contiguous), fp16/bf16 dtype, k % 8 == 0 (vectorized loads).
     skinny_ok = (
-        x.dtype in (torch.float16, torch.bfloat16)
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and x.dtype in (torch.float16, torch.bfloat16)
         and weight.dtype in (torch.float16, torch.bfloat16)
         and k % 8 == 0
         and weight.is_contiguous()

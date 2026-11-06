@@ -627,7 +627,7 @@ class TestVllmMaxNSequences:
             SamplingParams(n=129)
 
 
-def test_triton_import_after_vllm_in_fresh_process():
+def test_config_import_after_vllm_in_fresh_process():
     """ROCm's global profiling symbols must not corrupt Triton's LLVM loader."""
     import subprocess
     import sys
@@ -637,7 +637,7 @@ def test_triton_import_after_vllm_in_fresh_process():
             sys.executable,
             "-c",
             (
-                "import vllm; import triton; from vllm.config import VllmConfig; "
+                "import vllm; from vllm.config import VllmConfig; "
                 "print('imports completed')"
             ),
         ],

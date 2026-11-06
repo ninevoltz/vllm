@@ -376,7 +376,16 @@ at the virtual environment's `libtorch.so` and `libc10.so` using
 Mixing these libraries with system libtorch can cause a shutdown abort.
 
 MI100 uses the tuned Exllama path for compatible FP16 GPTQ linears and retains
-Triton fallbacks for BF16 models. Vision attention can use Torch SDPA.
+Triton fallbacks for BF16 models. Use Triton attention for vision to avoid the
+large temporary allocations of the SDPA fallback during profiling.
+
+Qwen4Exp sparse attention needs a minimum 16-row head tile on ROCm. Smaller
+tiles miscompile on gfx908 at TP4, producing fluent but incorrect output.
+This port includes the fix from the source fork commit `004b1ca779`.
+
+The example launcher disables SDMA transfers after an observed startup hang
+in `hipMemcpyWithStream` on this host. Set `HSA_ENABLE_SDMA=1` to opt back
+into the driver copy engines; see the [ROCR runtime environment variables](https://rocm.docs.amd.com/projects/ROCR-Runtime/en/docs-6.1.1/environment_variables.html).
 
 For Qwen4Exp checkpoints whose n-gram table exceeds available host memory,
 `--engram-config '{"disk_offload":true}' --enforce-eager` keeps the table in

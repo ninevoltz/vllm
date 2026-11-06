@@ -1,0 +1,103 @@
+{
+  "date": "2026-11-06",
+  "checkpoint": "btbtyler09/Qwen3.8-Flash-Next-GPTQ-4bit",
+  "snapshot": "9ae8d0e1989ad3a4eaeea501d5f6c75f4eeda7e1",
+  "hardware": "4x AMD Instinct MI100 32 GiB",
+  "tensor_parallel_size": 4,
+  "dtype": "bfloat16",
+  "context_limit": 262144,
+  "mtp_enabled": false,
+  "all_reduce": "RCCL/PYNCCL",
+  "execution": "eager",
+  "engram_storage": "checkpoint-backed disk offload, original BF16",
+  "results": [
+    {
+      "test": "text",
+      "answer": "4",
+      "usage": {
+        "prompt_tokens": 26,
+        "total_tokens": 28,
+        "completion_tokens": 2,
+        "completion_tokens_details": null
+      },
+      "seconds": 0.6378069589845836,
+      "passed": true
+    },
+    {
+      "test": "vision",
+      "answer": " Red",
+      "usage": {
+        "prompt_tokens": 221,
+        "total_tokens": 223,
+        "completion_tokens": 2,
+        "completion_tokens_details": null
+      },
+      "seconds": 1.2578273840190377,
+      "passed": true
+    },
+    {
+      "test": "video",
+      "answer": " Blue",
+      "usage": {
+        "prompt_tokens": 252,
+        "total_tokens": 254,
+        "completion_tokens": 2,
+        "completion_tokens_details": null
+      },
+      "seconds": 0.5175217009964399,
+      "passed": true
+    },
+    {
+      "test": "context",
+      "context_budget": 8192,
+      "answer": "Oslo\n\nThe inventory record explicitly states: \"warehouse W172 is located in Oslo.\" The subsequent background notes regarding shipment records are irrelevant to the location",
+      "usage": {
+        "prompt_tokens": 8160,
+        "total_tokens": 8192,
+        "completion_tokens": 32,
+        "completion_tokens_details": null
+      },
+      "seconds": 6.530964845995186,
+      "passed": true
+    },
+    {
+      "test": "context",
+      "context_budget": 32768,
+      "answer": "Kyoto\n\nThe inventory record explicitly states: \"warehouse W172 is located in Kyoto.\" The subsequent background notes regarding shipment records (X000",
+      "usage": {
+        "prompt_tokens": 32736,
+        "total_tokens": 32768,
+        "completion_tokens": 32,
+        "completion_tokens_details": null
+      },
+      "seconds": 19.055435001006117,
+      "passed": true
+    },
+    {
+      "test": "context",
+      "context_budget": 131072,
+      "answer": "Lima.\nThe inventory record states that warehouse W172 is located in Lima. The background notes provide information about various shipment records but do not contain",
+      "usage": {
+        "prompt_tokens": 131040,
+        "total_tokens": 131072,
+        "completion_tokens": 32,
+        "completion_tokens_details": null
+      },
+      "seconds": 72.65698202000931,
+      "passed": true
+    },
+    {
+      "test": "context",
+      "context_budget": 262144,
+      "answer": "Paris.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.\n.",
+      "usage": {
+        "prompt_tokens": 262112,
+        "total_tokens": 262144,
+        "completion_tokens": 32,
+        "completion_tokens_details": null
+      },
+      "seconds": 164.00473936798517,
+      "passed": true
+    }
+  ]
+}
