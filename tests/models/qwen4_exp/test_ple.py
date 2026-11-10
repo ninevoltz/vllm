@@ -2834,9 +2834,10 @@ def test_amd_ngram_embedding_matches_reference_under_compile(
     torch.testing.assert_close(output.float(), expected.float(), rtol=0, atol=0)
 
 
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_amd_disk_ple_loads_exact_checkpoint_rows(
-    tmp_path, dist_init, default_vllm_config, device
+    tmp_path, dist_init, default_vllm_config, device, dtype
 ):
     """AMD disk loading preserves BF16 rows without allocating the full table."""
     from vllm.config.engram import EngramConfig
@@ -2861,7 +2862,7 @@ def test_amd_disk_ple_loads_exact_checkpoint_rows(
             max_total_tokens=4,
             prefix="test.ple_embedding",
             layer_name="test.ple",
-            params_dtype=torch.bfloat16,
+            params_dtype=dtype,
         )
     embedding = module.ngram_embedding
     with safe_open(path, framework="pt") as checkpoint:
@@ -2883,7 +2884,9 @@ def test_amd_disk_ple_loads_exact_checkpoint_rows(
         torch.accelerator.synchronize()
     embedding.stage_rows(4)
     actual = embedding.staged_rows(4).cpu()
-    torch.testing.assert_close(actual, table[ids.cpu()].flatten(-2), rtol=0, atol=0)
+    torch.testing.assert_close(
+        actual, table[ids.cpu()].flatten(-2).to(dtype), rtol=0, atol=0
+    )
 
     if device == "cuda":
         # A replay must consume newly staged rows without capturing host reads.
@@ -2904,5 +2907,5 @@ def test_amd_disk_ple_loads_exact_checkpoint_rows(
                 output = embedding.staged_rows(4).clone()
             expected_ids = module.compute_ngram_ids(tokens, starts, context).cpu()
             torch.testing.assert_close(
-                output.cpu(), table[expected_ids].flatten(-2), rtol=0, atol=0
+                output.cpu(), table[expected_ids].flatten(-2).to(dtype), rtol=0, atol=0
             )

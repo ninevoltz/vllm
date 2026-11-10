@@ -863,9 +863,9 @@ def qsa_sparse_paged_attention(
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
     is_fp8 = k_cache.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
-    assert q.dtype == torch.bfloat16
+    assert q.dtype in (torch.bfloat16, torch.float16)
     assert k_cache.dtype == v_cache.dtype
-    assert is_fp8 or k_cache.dtype == torch.bfloat16, (
+    assert is_fp8 or k_cache.dtype == q.dtype, (
         "QSA sparse attention requires BF16 or FP8-e4m3 K/V"
     )
     assert logical_indices.dtype == block_table.dtype == torch.int32
@@ -1158,17 +1158,17 @@ def _qsa_prefill_selection_words_kernel(
 ) -> None:
     """Pack the expanded QSA selection into a per-row compressed-block bitmap.
 
-    ``logical_indices`` lists ``token_topk + compress_ratio - 1`` token ids per
-    query: ``compress_ratio`` consecutive columns per selected compressed block
+    `logical_indices` lists `token_topk + compress_ratio - 1` token ids per
+    query: `compress_ratio` consecutive columns per selected compressed block
     followed by the ragged tail of the open group.  Both runs start on a column
-    that is a multiple of ``compress_ratio`` (``expanded_count`` is
-    ``complete_blocks * compress_ratio``), so reading every ``compress_ratio``-th
+    that is a multiple of `compress_ratio` (`expanded_count` is
+    `complete_blocks * compress_ratio`), so reading every `compress_ratio`-th
     column visits each selected block exactly once.
 
     A block is marked; the attention kernel re-applies the causal bound, which
     is what clips the open block back to the ragged tail.  The scorer only ever
-    makes complete causal blocks visible (``columns < visible`` in
-    ``_qsa_mqa_paged_kernel``), so block-granular marking plus a causal mask
+    makes complete causal blocks visible (`columns < visible` in
+    `_qsa_mqa_paged_kernel`), so block-granular marking plus a causal mask
     reproduces the expanded token set exactly.
     """
     row = tl.program_id(0)
@@ -1206,8 +1206,8 @@ def _qsa_prefill_block_mask_kernel(
 ) -> None:
     """Scatter the selected compressed blocks of each row into a byte mask.
 
-    The ``compress_ratio`` block ids a row selects are distinct, so every store
-    lands on its own byte and no atomic is needed -- the atomic-``or`` variant
+    The `compress_ratio` block ids a row selects are distinct, so every store
+    lands on its own byte and no atomic is needed -- the atomic-`or` variant
     of this serialises ~8-way inside a wave because one program's lanes all
     target the same row's handful of bitmap words.
     """
@@ -1241,8 +1241,8 @@ def _qsa_prefill_pack_mask_kernel(
 ) -> None:
     """Pack the byte mask into 32-blocks-per-word bitmap words.
 
-    The attention kernel then needs one ``int32`` per query row per key tile
-    instead of a ``BLOCK_M x BLOCK_N`` byte gather.
+    The attention kernel then needs one `int32` per query row per key tile
+    instead of a `BLOCK_M x BLOCK_N` byte gather.
     """
     row = tl.program_id(0)
     words = tl.program_id(1) * BLOCK_W + tl.arange(0, BLOCK_W)
@@ -1269,8 +1269,8 @@ def _qsa_prefill_tile_starts_kernel(
 ) -> None:
     """Exclusive prefix sum of per-request query-tile counts (one program).
 
-    ``tile_starts[r]`` is the first tile id of request ``r`` and
-    ``tile_starts[num_requests]`` the total tile count, so the attention kernel
+    `tile_starts[r]` is the first tile id of request `r` and
+    `tile_starts[num_requests]` the total tile count, so the attention kernel
     can map a flat tile id back to its request without a host sync.
     """
     request = tl.arange(0, NUM_REQ_POW2)
@@ -1321,9 +1321,9 @@ def _qsa_prefill_tiled_kernel(
 ) -> None:
     """Query-tiled sparse GQA for prefill-shaped batches.
 
-    One program owns ``BLOCK_Q`` consecutive queries of one request across all
-    ``GROUP_SIZE`` query heads of one KV head, so the MFMA M dimension is
-    ``BLOCK_Q * GROUP_SIZE`` instead of the 6-of-16 padding the per-token
+    One program owns `BLOCK_Q` consecutive queries of one request across all
+    `GROUP_SIZE` query heads of one KV head, so the MFMA M dimension is
+    `BLOCK_Q * GROUP_SIZE` instead of the 6-of-16 padding the per-token
     kernel feeds it.  The tile walks its shared causal key range once (a
     contiguous token run, so the page gather is two block-table entries rather
     than a 2051-wide scatter) and applies the per-row selection as a bitmap
@@ -1477,16 +1477,16 @@ def qsa_prefill_tiled_attention(
 ) -> torch.Tensor:
     """Query-tiled sparse GQA over the paged BF16 K/V cache (prefill shapes).
 
-    Computes exactly what ``qsa_sparse_paged_attention`` computes for the same
-    ``logical_indices`` (up to fp32 summation order), but tiles the query
-    dimension: ``BLOCK_Q`` consecutive queries of one request share one pass
+    Computes exactly what `qsa_sparse_paged_attention` computes for the same
+    `logical_indices` (up to fp32 summation order), but tiles the query
+    dimension: `BLOCK_Q` consecutive queries of one request share one pass
     over their common causal key range, with the per-query selection applied as
     a compressed-block bitmap.  That removes the per-token 2051-wide index
-    gather and the ``6``-of-``16`` MFMA row padding of the decode-shaped kernel.
+    gather and the `6`-of-`16` MFMA row padding of the decode-shaped kernel.
 
-    Requires a prefill-shaped batch: ``query_positions`` must be the logical
-    position of every row and ``query_start_loc`` the per-request row offsets.
-    ``max_seq_len`` bounds the batch's contexts and sizes the bitmap.
+    Requires a prefill-shaped batch: `query_positions` must be the logical
+    position of every row and `query_start_loc` the per-request row offsets.
+    `max_seq_len` bounds the batch's contexts and sizes the bitmap.
     """
     if not q.is_cuda or not HAS_TRITON:
         raise RuntimeError("paged QSA tiled attention requires a GPU and Triton")
@@ -1508,7 +1508,8 @@ def qsa_prefill_tiled_attention(
         raise ValueError("QSA tiled attention requires a positive max_seq_len")
     head_dim = q.shape[2]
     assert head_dim >= 16 and (head_dim & (head_dim - 1)) == 0
-    assert q.dtype == k_cache.dtype == v_cache.dtype == torch.bfloat16
+    assert q.dtype in (torch.bfloat16, torch.float16)
+    assert q.dtype == k_cache.dtype == v_cache.dtype
     assert logical_indices.dtype == block_table.dtype == torch.int32
     assert q.device == k_cache.device == v_cache.device
     assert q.stride(2) == k_cache.stride(3) == v_cache.stride(3) == 1

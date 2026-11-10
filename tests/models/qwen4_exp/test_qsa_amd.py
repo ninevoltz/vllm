@@ -399,6 +399,7 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
     "num_rows,num_query_heads,num_kv_heads,page_size",
@@ -416,6 +417,7 @@ def test_qsa_sparse_paged_attention_matches_reference(
     num_kv_heads: int,
     page_size: int,
     use_fp8: bool,
+    dtype: torch.dtype,
 ) -> None:
     torch.manual_seed(2)
     head_dim = 256
@@ -426,16 +428,14 @@ def test_qsa_sparse_paged_attention_matches_reference(
     indexer_budget = 2048
     indexer_compress_ratio = 4
     selection_width = indexer_budget + indexer_compress_ratio - 1
-    q = torch.randn(
-        num_rows, num_query_heads, head_dim, device="cuda", dtype=torch.bfloat16
-    )
+    q = torch.randn(num_rows, num_query_heads, head_dim, device="cuda", dtype=dtype)
     kv_cache = torch.randn(
         num_cache_blocks,
         page_size,
         num_kv_heads,
         2 * head_dim,
         device="cuda",
-        dtype=torch.bfloat16,
+        dtype=dtype,
     )
     if use_fp8:
         fp8_dtype = current_platform.fp8_dtype()
@@ -529,17 +529,18 @@ def test_qsa_impl_constructs_with_fp8_kv(kv_cache_dtype: str) -> None:
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("context_len", [128, 4096])
-def test_qsa_tiled_prefill_matches_sparse_reference(context_len: int) -> None:
+def test_qsa_tiled_prefill_matches_sparse_reference(
+    context_len: int, dtype: torch.dtype
+) -> None:
     """Ragged TP4 prefill preserves sparse selection and causal boundaries."""
     torch.manual_seed(42)
     device = "cuda"
     page_size, head_dim = 16, 128
     pages = context_len // page_size
-    q = torch.randn(18, 6, head_dim, device=device, dtype=torch.bfloat16)
-    k = torch.randn(
-        2 * pages, page_size, 1, head_dim, device=device, dtype=torch.bfloat16
-    )
+    q = torch.randn(18, 6, head_dim, device=device, dtype=dtype)
+    k = torch.randn(2 * pages, page_size, 1, head_dim, device=device, dtype=dtype)
     v = torch.randn_like(k)
     block_table = torch.arange(2 * pages, device=device, dtype=torch.int32).view(
         2, pages

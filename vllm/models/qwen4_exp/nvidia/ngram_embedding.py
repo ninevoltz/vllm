@@ -120,6 +120,7 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
             )
             self._row_ids = torch.arange(rows[0] * rows[1], device=device)
         self._shards: dict[str, dict[int, torch.Tensor]] = {n: {} for n in self._planes}
+        self._converted_host: dict[str, torch.Tensor] = {}
         self._shard_size = 0
         self._bound = False
         self._fds: dict[str, int] = {}
@@ -144,12 +145,26 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         """Keep a checkpoint shard as a zero-copy byte view of its storage."""
         if self._bound:
             raise RuntimeError("PLE disk offload does not support weight reload")
-        dtype = getattr(self, name).dtype
-        if loaded_weight.dtype != dtype:
-            raise ValueError(
-                f"PLE shard {name} dtype {loaded_weight.dtype} must match the "
-                f"embedding dtype {dtype}; disk offload serves rows as stored"
-            )
+        staging, host, rows = self._planes[name]
+        if loaded_weight.dtype != host.dtype:
+            if (
+                not self._shards[name]
+                and name == "weight"
+                and not self._nvfp4
+                and staging.dtype == torch.float16
+                and loaded_weight.dtype == torch.bfloat16
+            ):
+                # Keep checkpoint bytes on the host; convert only requested rows
+                # before H2D so the device staging remains entirely FP16.
+                self._converted_host[name] = host
+                host = torch.empty_like(host, dtype=loaded_weight.dtype)
+                rows = torch.empty_like(host).view(torch.uint8).flatten(0, 1)
+                self._planes[name] = (staging, host, rows)
+            else:
+                raise ValueError(
+                    f"PLE shard {name} dtype {loaded_weight.dtype} must match the "
+                    f"embedding dtype {host.dtype}; disk offload serves rows as stored"
+                )
         if shard_index in self._shards[name]:
             raise ValueError(f"Duplicate PLE embedding shard {shard_index} {name}")
         self._shards[name][shard_index] = loaded_weight.view(torch.uint8)
@@ -201,8 +216,13 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
                 out = host[:num_tokens].flatten(0, 1).view(torch.uint8)
                 self._read_rows(name, shard, local, rows[: ids.numel()])
                 torch.index_select(rows[: ids.numel()], 0, inverse, out=out)
-        for staging, host, _ in self._planes.values():
-            staging[:num_tokens].copy_(host[:num_tokens], non_blocking=True)
+        for name, (staging, host, _) in self._planes.items():
+            source = host[:num_tokens]
+            if name in self._converted_host:
+                converted = self._converted_host[name][:num_tokens]
+                converted.copy_(source)
+                source = converted
+            staging[:num_tokens].copy_(source, non_blocking=True)
 
     def _read_rows(
         self,

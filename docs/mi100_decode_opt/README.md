@@ -2,10 +2,12 @@
 
 Decode-throughput investigation for Qwen3.6 models on vLLM, targeting 4× AMD Instinct MI100 (gfx908) with XGMI peer-to-peer.
 
+For the current Qwen4Exp/Qwen3.8 deployment, see [FP16 serving](fp16_serving.md).
+
 ## Models tracked
 
 | Model | Status | Headline result | Doc |
-|---|---|---|---|
+| --- | --- | --- | --- |
 | Qwen3.6-35B-A3B-GPTQ-8bit | shipped (3 rounds, branch `mi100-optimized`) | TPOT 19.5 → 11.00 ms (**+76% throughput**) at c=1 | [qwen3_6_35b.md](qwen3_6_35b.md) |
 | Qwen3.6-27B-GPTQ-8bit | investigated, no ship | baseline 20.43 ms TPOT @ c=1; round-3 levers don't transfer to a fully-GPTQ workload | [qwen3_6_27b.md](qwen3_6_27b.md) |
 
@@ -38,6 +40,7 @@ This is the sequence we re-use per model. Each step either ships a patch or rule
 ## Forward-looking work
 
 [`round4_candidates.md`](round4_candidates.md) — punch-list of levers that haven't shipped yet. Notable items:
+
 - **K** (cheap, ~30 lines): hoist the n>4 check above the custom op so high-concurrency `F.linear` fallback gets back into the inductor graph. Restores round-2 perf at c=64+128 without losing round-3 wins at c=1–32.
 - **A / D** (cheap): NCCL re-sweep on a new model, MoE block compile-wrap (model-dependent, doesn't apply to current Qwen3.6 variants).
 - **E** (multi-day, ~16% TPOT prize): custom CAR replacement in HIP that re-exchanges IPC handles outside cudagraph capture.
@@ -50,7 +53,7 @@ This is the sequence we re-use per model. Each step either ships a patch or rule
 ## Subdirectories
 
 | Path | Contents |
-|---|---|
+| --- | --- |
 | `scripts/` | Reproduction scripts (test harnesses, microbenches, profiler bucketizer, coherence smoke) |
 | `tunableop_results/` | PyTorch TunableOp CSVs from Stage 5f (per-rank, 358 entries each). NOT enabled by default — kept for potential c≥8 evaluation. |
 | `moe_tune_output/` | `benchmark_moe.py` output for E=256/N=128/MI100. Doesn't load against `fused_moe_kernel_gptq_awq` — kept as artifact for round-4 hand-edit. |
