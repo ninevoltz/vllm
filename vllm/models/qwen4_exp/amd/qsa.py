@@ -118,7 +118,7 @@ _QSA_CACHE_DTYPES: tuple[CacheDType, ...] = (
 class Qwen4ExpQSABackend(AttentionBackend):
     """FullAttentionSpec backend used by the merged QSA owner.
 
-    With an Octave ``kv_cache_dtype`` the main K/V cache holds one packed
+    With an Octave `kv_cache_dtype` the main K/V cache holds one packed
     Octave slot per (token, KV head) and sparse attention runs the Octave
     sparse decode kernel over the selected positions.
     """
@@ -312,12 +312,12 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
     ) -> torch.Tensor:
         """Sparse QSA with the query dimension tiled (prefill-shaped batches).
 
-        Same selection and same math as :meth:`forward_qsa`; the kernel tiles
-        ``BLOCK_Q`` consecutive queries of a request into the MFMA M dimension
+        Same selection and same math as `forward_qsa`; the kernel tiles
+        `BLOCK_Q` consecutive queries of a request into the MFMA M dimension
         and walks their shared causal key range once instead of re-gathering a
         2051-wide index list per token.  Only valid when every row's logical
         position is known (prefill), which is why the gate requires
-        ``max_query_len > 1``.
+        `max_query_len > 1`.
         """
         num_tokens = attn_metadata.num_actual_tokens
         output.zero_()

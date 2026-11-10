@@ -6,8 +6,8 @@ The MTP draft model reuses the Qwen4Exp backbone (PLE/HC/MoE) but:
   - drops all multi-modal handling (text-only),
   - forces PLE off while keeping the main model's HC stream count,
   - fuses the backbone hidden and the new-token embedding via
-    ``residual_linear_shared`` (fc_embedding + shared fc_hidden) instead of
-    the ``Linear(2H, H)`` + repeat used by other MTP variants,
+    `residual_linear_shared` (fc_embedding + shared fc_hidden) instead of
+    the `Linear(2H, H)` + repeat used by other MTP variants,
   - emits TWO hidden streams per step (scheme A): a single stream [T, H]
     (final-mixer collapsed, fed to the LM head) and a pre-final-mixer
     multi stream [T, hc_count*H] (fed to the next draft step).
@@ -154,11 +154,11 @@ def _mtp_checkpoint_is_unquantized(vllm_config: VllmConfig) -> bool:
 def _configure_mtp_rtn_quant_config(quant_config, mtp_start_layer_idx: int, bits: int):
     """Adapt the (deep-copied) target GPTQ config for a load-time RTN draft.
 
-    ``w4``: the config is used as-is for the experts (4-bit, group 32, sym == the
+    `w4`: the config is used as-is for the experts (4-bit, group 32, sym == the
     target's layout, so the gfx908 W4A8 HIP GEMV / shared-as-expert / fused
     router all apply) and the shared expert is added to the quantized-module list
     so it is built as a GPTQ linear like the target's.
-    ``w8moe``: the MoeWNA16 method reads ``full_config`` (bits / group_size), so a
+    `w8moe`: the MoeWNA16 method reads `full_config` (bits / group_size), so a
     modified copy selects int8 group-128 for the experts; the shared expert stays
     bf16 (+ W8A16 opt-in).
     """
