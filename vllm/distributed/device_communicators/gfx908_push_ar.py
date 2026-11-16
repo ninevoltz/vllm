@@ -1,25 +1,28 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""gfx908 sentinel push all-reduce (env ``VLLM_GFX908_PUSH_AR=1``, default OFF).
+"""gfx908 sentinel push all-reduce (env `VLLM_GFX908_PUSH_AR=1`, default OFF).
+
+Standalone push/consume supports FP16 and BF16 payloads with FP32 accumulation.
+The fused producer shortcuts below remain BF16-only.
 
 Decode-sized TP all-reduces on 4x MI100 cost 7.7-21.8 us through
-``cross_device_reduce_1stage`` (a start barrier, a staged copy, the reduce, an end
+`cross_device_reduce_1stage` (a start barrier, a staged copy, the reduce, an end
 barrier).
 The push scheme replaces the two barriers and the staging copy with a data-carried
 handshake:
 
-* every rank owns one uncached, IPC-shared receive buffer pre-armed with the bf16
-``-0.0``
-  sentinel (``0x8000``);
-* the producer kernel writes this rank's partial into slot ``(site, my_rank)`` of *all*
+* every rank owns one uncached, IPC-shared receive buffer pre-armed with the 16-bit
+`-0.0`
+  sentinel (`0x8000`);
+* the producer kernel writes this rank's partial into slot `(site, my_rank)` of *all*
 four
-  ranks' buffers (fire-and-forget nontemporal stores), sanitizing ``-0.0`` to ``+0.0``
+  ranks' buffers (fire-and-forget nontemporal stores), sanitizing `-0.0` to `+0.0`
   on the way;
 * the consumer kernel spins on its own 16 B of each of the four source rows until none
 of them
   still reads as the sentinel, sums them in fixed rank order in fp32 (bitwise identical
   to
-  vLLM's ``packed_reduce``), writes the output, and re-arms the slot.
+  vLLM's `packed_reduce`), writes the output, and re-arms the slot.
 
 Graph-timed on an idle 4x MI100 box (agents/ar_push/REPORT.md section 5), us per
 all-reduce:
@@ -33,11 +36,11 @@ T (2560 wide) stock custom AR  push+consume
 48 (240 KB)  21.78           15.00
 ===========  ==============  ==============
 
-Output is bit-identical to ``cross_device_reduce_1stage`` except for one inert case:
+Output is bit-identical to `cross_device_reduce_1stage` except for one inert case:
 when all four
-ranks contribute exactly ``-0.0`` for an element the stock kernel yields ``-0.0`` and
+ranks contribute exactly `-0.0` for an element the stock kernel yields `-0.0` and
 this path
-yields ``+0.0``.
+yields `+0.0`.
 
 Site discipline (the correctness-critical part): a slot may not be pushed again before
 every rank
@@ -54,24 +57,24 @@ all-reduces per
 decode step.
 
 Env knobs:
-  ``VLLM_GFX908_PUSH_AR``         1 to enable (default 0)
-  ``VLLM_GFX908_PUSH_AR_TMAX``    max rows of a push-eligible message (default 48)
-  ``VLLM_GFX908_PUSH_AR_WIDTH``   slot width in elements (default: model hidden size,
+  `VLLM_GFX908_PUSH_AR`         1 to enable (default 0)
+  `VLLM_GFX908_PUSH_AR_TMAX`    max rows of a push-eligible message (default 48)
+  `VLLM_GFX908_PUSH_AR_WIDTH`   slot width in elements (default: model hidden size,
   else 2560)
-  ``VLLM_GFX908_PUSH_AR_SITES``   graph slots (default 128)
-  ``VLLM_GFX908_PUSH_AR_EAGER``   eager slots (default 8)
-  ``VLLM_GFX908_PUSH_AR_MAX_SPIN`` bounded spin, poll rounds (default 4194304, ~3 s)
-  ``VLLM_GFX908_PUSH_AR_STATS``   1 to also collect the per-wave spin histogram (costs
+  `VLLM_GFX908_PUSH_AR_SITES`   graph slots (default 128)
+  `VLLM_GFX908_PUSH_AR_EAGER`   eager slots (default 8)
+  `VLLM_GFX908_PUSH_AR_MAX_SPIN` bounded spin, poll rounds (default 4194304, ~3 s)
+  `VLLM_GFX908_PUSH_AR_STATS`   1 to also collect the per-wave spin histogram (costs
   ~0.5 us)
-  ``VLLM_GFX908_PUSH_AR_FUSED_PRODUCER`` 1 to let a producing GEMV/reduce kernel write
+  `VLLM_GFX908_PUSH_AR_FUSED_PRODUCER` 1 to let a producing GEMV/reduce kernel write
   the peers'
-                                  slots from its own epilogue, removing the ``push_k``
+                                  slots from its own epilogue, removing the `push_k`
                                   launch
                                   (default 0; see the "fused producer" section below)
-  ``VLLM_GFX908_PUSH_AR_FUSED_SAFE`` 1 to also write the producer's local output tensor
+  `VLLM_GFX908_PUSH_AR_FUSED_SAFE` 1 to also write the producer's local output tensor
   (default 0)
 
-Fused producer (``VLLM_GFX908_PUSH_AR_FUSED_PRODUCER=1``)
+Fused producer (`VLLM_GFX908_PUSH_AR_FUSED_PRODUCER=1`)
 --------------------------------------------------------
 The push half of the collective is a *fire-and-forget store*: the payload is the flag,
 ownership is
@@ -79,23 +82,23 @@ per element, and there is no fence, arrival counter or cross-workgroup order any
 the
 scheme.  A kernel that already computes the partial can therefore store it straight into
 the four
-ranks' slots and the separate ``push_k`` launch disappears -- 96 of the 98 all-reduces
+ranks' slots and the separate `push_k` launch disappears -- 96 of the 98 all-reduces
 of a decode
 step are produced by three kernels:
 
   ===========================  =========  ===============================
   producer                     per step   kernel
   ===========================  =========  ===============================
-  GDN ``out_proj``                   36   ``w8sw_gemv`` (pushmode)
-  MoE weighted-sum reduce            48   ``moe_reduce_push``
-  QSA ``o_proj``                     12   ``gemv_slab_prep_push``
+  GDN `out_proj`                   36   `w8sw_gemv` (pushmode)
+  MoE weighted-sum reduce            48   `moe_reduce_push`
+  QSA `o_proj`                     12   `gemv_slab_prep_push`
   ===========================  =========  ===============================
 
-Mechanics: the layer arms a claim right before the producing call (``arm_fused_push``),
+Mechanics: the layer arms a claim right before the producing call (`arm_fused_push`),
 the
-producer's Python wrapper claims a site (``claim_fused_push``) and passes the peer
+producer's Python wrapper claims a site (`claim_fused_push`) and passes the peer
 pointers to its
-kernel, and the all-reduce entry point recognises the tensor (``take_fused_push``) and
+kernel, and the all-reduce entry point recognises the tensor (`take_fused_push`) and
 runs the
 consume half only.  A claim that is never taken is drained (consumed into a scratch
 tensor) so a
@@ -221,7 +224,7 @@ def _tp_push_ar():
 def arm_fused_push(kinds, t: int, n: int) -> None:
     """Allow the next matching producer inside this block to push from its epilogue.
 
-    ``kinds`` is the producer name (or a tuple of names) that may claim, ``(t, n)`` the
+    `kinds` is the producer name (or a tuple of names) that may claim, `(t, n)` the
     exact
     output shape of the all-reduce this block will issue.  Both guards matter: within an
     armed
@@ -242,12 +245,12 @@ def disarm_fused_push() -> None:
 
 
 def claim_fused_push(kind: str, out: torch.Tensor):
-    """Called by a producer's Python wrapper.  Returns ``(bases, off_elems, pushmode)``
+    """Called by a producer's Python wrapper.  Returns `(bases, off_elems, pushmode)`
     or None.
 
     On success the caller MUST launch its kernel with those arguments; if it declines
     the config
-    afterwards it must call :func:`drop_fused_push` (the site is then skipped on every
+    afterwards it must call `drop_fused_push` (the site is then skipped on every
     rank,
     which keeps the site sequence aligned).
     """
@@ -317,7 +320,7 @@ def drop_fused_push() -> None:
 
 
 def take_fused_push(x: torch.Tensor):
-    """Called by the all-reduce entry point.  ``(par, site, T, N)`` when ``x`` was
+    """Called by the all-reduce entry point.  `(par, site, T, N)` when `x` was
     pushed by its
     producer, else None -- and any stale claim is drained first so a slot is never left
     dirty.
@@ -439,7 +442,7 @@ def _default_width() -> int:
 
 
 class PushAllreduce:
-    """Dispatch sentinel push reductions across four BF16 ranks on one node."""
+    """Dispatch sentinel push reductions across four FP16/BF16 ranks on one node."""
 
     def __init__(self, ca):
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -464,7 +467,7 @@ class PushAllreduce:
             "the push scheme needs >= 2 slots per cycle"
         )
 
-        # bf16 elements per (site, source rank); the largest message this path accepts.
+        # 16-bit elements per (site, source rank).
         self.slot_elems = ((tmax * width) // 8) * 8
         self.sites = self.graph_sites + self.eager_sites
         self.nbytes = self.sites * self.world_size * self.slot_elems * 2
@@ -490,7 +493,7 @@ class PushAllreduce:
         logger.info(
             (
                 "gfx908 push AR enabled: %d+%d slots x %d ranks x %d "
-                "elems = %.1f MB/rank, max message %d bf16 elements "
+                "elems = %.1f MB/rank, max message %d 16-bit elements "
                 "(e.g. T <= %d at width %d)"
             ),
             self.graph_sites,
@@ -531,7 +534,11 @@ class PushAllreduce:
 
     # -------------------------------------------------------------- dispatch
     def eligible(self, inp: torch.Tensor) -> bool:
-        if inp.dtype is not torch.bfloat16 or not inp.is_contiguous() or inp.dim() < 2:
+        if (
+            inp.dtype not in (torch.float16, torch.bfloat16)
+            or not inp.is_contiguous()
+            or inp.dim() < 2
+        ):
             return False
         n = inp.shape[-1]
         if n % 8 or n > 8192 or n == 0:
@@ -610,7 +617,7 @@ class PushAllreduce:
         out.
 
         Called from the gfx908 step timer every 200 steps and at teardown. A non-zero
-        ``timeouts`` means a consumer gave up waiting for a rank's push and summed the
+        `timeouts` means a consumer gave up waiting for a rank's push and summed the
         sentinel: the run is corrupt and the site sequence diverged across ranks.
         Returns True when the counters are clean.
         """

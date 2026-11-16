@@ -24,7 +24,7 @@ export VLLM_GFX908_W8A16=1
 export VLLM_GFX908_W4A8=1
 export VLLM_GFX908_HC_W8=1 VLLM_GFX908_HC_W8_FREE=0
 export VLLM_GFX908_SMALLM_HC_W8=1
-export VLLM_GFX908_PUSH_AR=1
+export VLLM_GFX908_PUSH_AR="${MI100_PUSH_AR:-1}"
 export VLLM_GFX908_GDN_FUSED=1 VLLM_GFX908_GDN_FUSED_SPEC=1
 export VLLM_GFX908_W4_DEQUANT_LARGE_M=1
 export VLLM_GFX908_QSA_PREFILL_TILED=1 VLLM_GFX908_QSA_NUM_COLUMNS=1
@@ -34,7 +34,7 @@ if [[ "${model_dtype}" == "float16" ]]; then
     export VLLM_GFX908_W8A16=0 VLLM_GFX908_W4A8=0
     export VLLM_GFX908_HC_FUSED=0 VLLM_GFX908_HC_W8=0
     export VLLM_GFX908_HC_FINAL_W8=0 VLLM_GFX908_HC_AR_FUSED=0
-    export VLLM_GFX908_SMALLM_HC_W8=0 VLLM_GFX908_PUSH_AR=0
+    export VLLM_GFX908_SMALLM_HC_W8=0 VLLM_GFX908_PUSH_AR="${MI100_PUSH_AR:-0}"
     export VLLM_GFX908_GDN_FUSED=0 VLLM_GFX908_GDN_FUSED_SPEC=0
 fi
 export HSA_ENABLE_SDMA="${HSA_ENABLE_SDMA:-0}"
@@ -42,7 +42,12 @@ export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
 
 speculative_args=()
 if [[ "${MI100_MTP:-1}" == "1" ]]; then
-    speculative_args=(--speculative-config '{"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}')
+    mtp_tokens="${MI100_MTP_TOKENS:-3}"
+    if [[ ! "${mtp_tokens}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "MI100_MTP_TOKENS must be a positive integer" >&2
+        exit 2
+    fi
+    speculative_args=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${mtp_tokens},\"draft_sample_method\":\"probabilistic\"}")
 fi
 
 exec "${env_root}/.venv/bin/vllm" serve "${model_path}" \

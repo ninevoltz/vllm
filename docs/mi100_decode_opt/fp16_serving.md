@@ -17,13 +17,24 @@ To select the previous BF16 configuration:
 MI100_DTYPE=bfloat16 tools/mi100/serve_qwen4_exp.sh /path/to/checkpoint
 ```
 
-The launcher disables the BF16-only W8A16, W4A8, HyperConnection, push-all-reduce,
-and fused GDN shortcuts in FP16 mode. QSA uses dtype-compatible Triton attention
+The launcher disables the BF16-only W8A16, W4A8, HyperConnection,
+and fused GDN shortcuts in FP16 mode. Standalone FP16 push all-reduce is
+opt-in with `MI100_PUSH_AR=1`; its fused producer shortcuts remain BF16-only.
+See [FP16 push all-reduce](fp16_push_all_reduce.md) for numerical checks and
+timing. QSA uses dtype-compatible Triton attention
 and the unfused indexer preparation path. Disk-offloaded BF16 PLE checkpoint
 rows are converted on the CPU before transfer into FP16 GPU staging buffers;
 the checkpoint itself is unchanged. Loading BF16 checkpoint weights into FP16
 parameters still produces conversion warnings; these describe checkpoint
 conversion rather than BF16 runtime storage.
+
+`MI100_MTP_TOKENS` selects the positive number of speculative tokens when MTP
+is enabled. It defaults to three. `MI100_MTP=0` disables speculation. For example:
+
+```bash
+MI100_PUSH_AR=1 MI100_MTP_TOKENS=4 \
+  tools/mi100/serve_qwen4_exp.sh /path/to/checkpoint
+```
 
 FP16 has less exponent range than BF16. Validate model outputs before relying
 on a different checkpoint or larger workload. Changing dtype also changes
