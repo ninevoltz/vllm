@@ -257,7 +257,6 @@ if _ON_GFX908:
         # Disable FP8/FP4 (no hardware support)
         "VLLM_ROCM_USE_AITER_FP8BMM": "0",
         "VLLM_ROCM_USE_AITER_FP4BMM": "0",
-        "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM": "0",
         # Triton GEMM: enabled, but utils.use_aiter_triton_gemm() shape whitelist
         # restricts dispatch to specific (m,k) pairs that microbench wins over rocBLAS.
         # Broad-application historically -25% (dtype cast); shape-gated is safe.

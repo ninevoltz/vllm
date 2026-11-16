@@ -662,6 +662,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Opt-in MI100 kernel paths; the launcher selects the validated combination.
     "VLLM_GFX908_W8A16": lambda: os.getenv("VLLM_GFX908_W8A16", "0") == "1",
     "VLLM_GFX908_W4A8": lambda: os.getenv("VLLM_GFX908_W4A8", "0") == "1",
+    "VLLM_GFX908_HC_FUSED": lambda: os.getenv("VLLM_GFX908_HC_FUSED", "1") == "1",
+    "VLLM_GFX908_HC_FINAL_W8": lambda: os.getenv("VLLM_GFX908_HC_FINAL_W8", "0") == "1",
+    "VLLM_GFX908_HC_AR_FUSED": lambda: os.getenv("VLLM_GFX908_HC_AR_FUSED", "1") == "1",
     "VLLM_GFX908_HC_W8": lambda: os.getenv("VLLM_GFX908_HC_W8", "0") == "1",
     "VLLM_GFX908_HC_W8_FREE": lambda: os.getenv("VLLM_GFX908_HC_W8_FREE", "1") == "1",
     "VLLM_GFX908_SMALLM_HC_W8": lambda: (

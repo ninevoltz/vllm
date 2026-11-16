@@ -57,3 +57,9 @@ With the local Qwen3.8-Flash-Next GPTQ-4bit checkpoint on four MI100 GPUs:
 The advertised 262144-token capacity was retained in the launcher, but this FP16
 validation exercised context lengths only through 8192 tokens. Recovered ROCm
 allocator warnings still occurred; no validation request failed.
+
+The FP16 launcher explicitly sets `VLLM_GFX908_HC_FUSED`,
+`VLLM_GFX908_HC_FINAL_W8`, and `VLLM_GFX908_HC_AR_FUSED` to zero. These
+controls disable BF16-only HyperConnection paths and are recognized by strict
+environment validation. Keep these guards when using FP16. The gfx908 platform
+no longer sets the obsolete `VLLM_ROCM_USE_AITER_FP4_ASM_GEMM` variable.
